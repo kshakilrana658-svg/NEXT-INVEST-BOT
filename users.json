@@ -49,6 +49,13 @@
         "status": "completed",
         "details": "Added by admin",
         "timestamp": "2026-03-23T18:22:57.451958"
+      },
+      {
+        "type": "admin_add",
+        "amount": 100000.0,
+        "status": "completed",
+        "details": "Added by admin",
+        "timestamp": "2026-03-23T18:27:15.982835"
       }
     ],
     "banned": false
