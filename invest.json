@@ -18,5 +18,17 @@
       "duration_days": 30,
       "min_amount": 100
     }
+  },
+  "investments": {
+    "7650251578": [
+      {
+        "plan_id": "basic",
+        "amount": 10.0,
+        "start_date": "2026-03-23T19:38:09.786824",
+        "end_date": "2026-03-30T19:38:09.786815",
+        "status": "active",
+        "profit_added": false
+      }
+    ]
   }
 }
