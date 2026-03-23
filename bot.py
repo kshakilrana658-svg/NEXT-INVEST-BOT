@@ -23,6 +23,11 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 DEPOSIT_NUMBER = os.environ.get("DEPOSIT_NUMBER", "01309924182")
 
+# Rates
+DEPOSIT_RATE_USD_TO_BDT = 130   # 1 USD = 130 BDT
+WITHDRAW_RATE_USD_TO_BDT = 110  # 1 USD = 110 BDT (for display)
+WITHDRAW_SERVICE_CHARGE_BDT = 10
+
 if not BOT_TOKEN or not OWNER_ID or not FORCE_CHANNEL or not FORCE_GROUP or not GITHUB_TOKEN or not GITHUB_REPO:
     raise ValueError("Missing required environment variables")
 
@@ -165,7 +170,7 @@ def approve_deposit(req_id):
     deposits = github_read("deposit.json")
     if req_id in deposits and deposits[req_id]["status"] == "pending":
         req = deposits[req_id]
-        usd_amount = req["amount_bdt"] / 130
+        usd_amount = req["amount_bdt"] / DEPOSIT_RATE_USD_TO_BDT
         update_balance(req["user_id"], usd_amount, "add")
         add_transaction(req["user_id"], "deposit", usd_amount, "completed", f"Deposit of {req['amount_bdt']} BDT approved")
         deposits[req_id]["status"] = "approved"
@@ -326,11 +331,11 @@ def is_joined(user_id):
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
-        "📊 Plans", "🚀 Invest",
-        "💰 Wallet", "💳 Deposit",
-        "💵 Withdraw", "📈 My Investment",
-        "💸 Profit", "🤝 Referral",
-        "👤 Profile", "📩 Support"
+        "📊 Investment Plans", "🚀 Invest Now",
+        "💰 My Wallet", "💳 Deposit Money",
+        "💵 Withdraw Money", "📈 My Investments",
+        "💸 Profit History", "🤝 Referral Program",
+        "👤 My Profile", "📩 Support & Help"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
@@ -346,10 +351,10 @@ def welcome_message(first_name):
         f"✅ রেফারেল লিংক শেয়ার করে আয় করুন\n"
         f"✅ সহজেই উইথড্র করুন\n\n"
         f"💡 <b>প্রথম পদক্ষেপ:</b>\n"
-        f"1️⃣ নিচের মেনু থেকে <b>💳 Deposit</b> বাটনে ক্লিক করুন\n"
+        f"1️⃣ নিচের মেনু থেকে <b>💳 Deposit Money</b> বাটনে ক্লিক করুন\n"
         f"2️⃣ TXID ও পরিমাণ দিন (শুধু টাকা পাঠানোর রেফারেন্স)\n"
         f"3️⃣ এডমিন অনুমোদন দিলে ব্যালান্স অ্যাড হবে\n"
-        f"4️⃣ তারপর <b>🚀 Invest</b> করে ইনভেস্ট করুন\n\n"
+        f"4️⃣ তারপর <b>🚀 Invest Now</b> করে ইনভেস্ট করুন\n\n"
         f"🎁 <b>বোনাস:</b> সাইনআপে $0.05, প্রতি রেফারে $0.01\n\n"
         f"🔽 <b>নিচের বাটন ব্যবহার করে শুরু করুন</b> 🔽"
     )
@@ -409,7 +414,7 @@ def verify_cb(call):
         bot.answer_callback_query(call.id, "Still not joined. Please join both.")
 
 # ------------------- MAIN BUTTON HANDLERS -------------------
-@bot.message_handler(func=lambda m: m.text == "📊 Plans")
+@bot.message_handler(func=lambda m: m.text == "📊 Investment Plans")
 def plans_btn(m):
     plans = get_plans()
     text = "📈 <b>Investment Plans:</b>\n\n"
@@ -417,7 +422,7 @@ def plans_btn(m):
         text += f"🔹 <b>{p['name']}</b>\n   Profit: {p['profit_percent']}%\n   Duration: {p['duration_days']} days\n   Min: ${p['min_amount']}\n\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "🚀 Invest")
+@bot.message_handler(func=lambda m: m.text == "🚀 Invest Now")
 def invest_btn(m):
     settings = get_settings()
     if not settings.get("deposit_enabled", True):
@@ -451,7 +456,7 @@ def process_invest(m):
         logger.error(f"Invest error: {e}")
         bot.send_message(m.chat.id, "❌ Invalid format. Use: plan_id amount")
 
-@bot.message_handler(func=lambda m: m.text == "💰 Wallet")
+@bot.message_handler(func=lambda m: m.text == "💰 My Wallet")
 def wallet_btn(m):
     bal = get_user_balance(m.from_user.id)
     user = get_user(m.from_user.id)
@@ -461,13 +466,15 @@ def wallet_btn(m):
         text += f"{t['type']}: ${t['amount']} ({t['status']})\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "💳 Deposit")
+@bot.message_handler(func=lambda m: m.text == "💳 Deposit Money")
 def deposit_btn(m):
     settings = get_settings()
     if not settings.get("deposit_enabled", True):
         bot.send_message(m.chat.id, "❌ Deposit is currently disabled by admin.")
         return
-    msg = bot.send_message(m.chat.id, f"📱 <b>Send Money / Cash In</b>\nNumber: <code>{DEPOSIT_NUMBER}</code>\n\nAfter sending, <b>enter the TXID</b>:", parse_mode="HTML")
+    # Show rate info
+    info = f"💱 <b>Deposit Rate:</b> 1 USD = {DEPOSIT_RATE_USD_TO_BDT} BDT\n"
+    msg = bot.send_message(m.chat.id, info + f"📱 <b>Send Money / Cash In</b>\nNumber: <code>{DEPOSIT_NUMBER}</code>\n\nAfter sending, <b>enter the TXID</b>:", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_txid)
 
 def process_deposit_txid(m):
@@ -478,7 +485,7 @@ def process_deposit_txid(m):
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[m.from_user.id] = {"txid": txid}
-    bot.send_message(m.chat.id, "💸 <b>Enter the amount in BDT you sent:</b>", parse_mode="HTML")
+    bot.send_message(m.chat.id, "💸 <b>Enter the amount in BDT you sent:</b>\n(You'll receive USD = amount / 130)", parse_mode="HTML")
     bot.register_next_step_handler(m, process_deposit_amount)
 
 def process_deposit_amount(m):
@@ -486,25 +493,42 @@ def process_deposit_amount(m):
         amount_bdt = float(m.text)
         if amount_bdt <= 0:
             raise ValueError
+        usd_amount = amount_bdt / DEPOSIT_RATE_USD_TO_BDT
+        # Show conversion
+        confirm = f"✅ You sent {amount_bdt} BDT → will receive ${usd_amount:.2f} USD.\n\nConfirm? (yes/no)"
+        msg = bot.send_message(m.chat.id, confirm)
+        # Store temp data
+        bot.temp_deposit[m.from_user.id]["amount_bdt"] = amount_bdt
+        bot.register_next_step_handler(msg, lambda m2: confirm_deposit(m2, m.from_user.id))
     except:
         bot.send_message(m.chat.id, "❌ Invalid amount. Please start deposit again.")
-        return
-    txid = bot.temp_deposit.get(m.from_user.id, {}).get("txid")
-    if not txid:
-        bot.send_message(m.chat.id, "❌ TXID missing. Please start deposit again.")
-        return
-    req_id = create_deposit_request(m.from_user.id, amount_bdt, txid)
-    bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\nAmount: {amount_bdt} BDT\nTXID: <code>{txid}</code>\nRequest ID: <code>{req_id}</code>\n\nAdmin will review it.", parse_mode="HTML")
-    if hasattr(bot, 'temp_deposit') and m.from_user.id in bot.temp_deposit:
-        del bot.temp_deposit[m.from_user.id]
+        if hasattr(bot, 'temp_deposit') and m.from_user.id in bot.temp_deposit:
+            del bot.temp_deposit[m.from_user.id]
 
-@bot.message_handler(func=lambda m: m.text == "💵 Withdraw")
+def confirm_deposit(m, user_id):
+    if m.text.lower() in ["yes", "y", "হ্যাঁ"]:
+        txid = bot.temp_deposit.get(user_id, {}).get("txid")
+        amount_bdt = bot.temp_deposit.get(user_id, {}).get("amount_bdt")
+        if not txid or not amount_bdt:
+            bot.send_message(m.chat.id, "❌ Missing data. Please start deposit again.")
+            return
+        req_id = create_deposit_request(user_id, amount_bdt, txid)
+        bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\nAmount: {amount_bdt} BDT\nTXID: <code>{txid}</code>\nRequest ID: <code>{req_id}</code>\n\nAdmin will review it.", parse_mode="HTML")
+        # Clean up temp
+        del bot.temp_deposit[user_id]
+    else:
+        bot.send_message(m.chat.id, "❌ Deposit cancelled.")
+        if hasattr(bot, 'temp_deposit') and user_id in bot.temp_deposit:
+            del bot.temp_deposit[user_id]
+
+@bot.message_handler(func=lambda m: m.text == "💵 Withdraw Money")
 def withdraw_btn(m):
     settings = get_settings()
     if not settings.get("withdraw_enabled", True):
         bot.send_message(m.chat.id, "❌ Withdrawal is currently disabled by admin.")
         return
-    msg = bot.send_message(m.chat.id, "💸 <b>Enter amount in USD (min $5):</b>", parse_mode="HTML")
+    info = f"💱 <b>Withdraw Rate:</b> 1 USD = {WITHDRAW_RATE_USD_TO_BDT} BDT\n💰 <b>Service Charge:</b> {WITHDRAW_SERVICE_CHARGE_BDT} BDT per withdrawal\n"
+    msg = bot.send_message(m.chat.id, info + "💸 <b>Enter amount in USD (min $5):</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_withdraw_amount)
 
 def process_withdraw_amount(m):
@@ -517,14 +541,26 @@ def process_withdraw_amount(m):
         if bal < amount:
             bot.send_message(m.chat.id, "❌ Insufficient balance.")
             return
-        # Inline keyboard for method selection
+        # Show estimated BDT after charge
+        estimated_bdt = amount * WITHDRAW_RATE_USD_TO_BDT - WITHDRAW_SERVICE_CHARGE_BDT
+        if estimated_bdt < 0:
+            estimated_bdt = 0
+        confirm_text = f"💸 You will receive approximately {estimated_bdt:.2f} BDT after charge.\n\nProceed? (yes/no)"
+        msg = bot.send_message(m.chat.id, confirm_text)
+        bot.register_next_step_handler(msg, lambda m2: confirm_withdraw(m2, amount))
+    except:
+        bot.send_message(m.chat.id, "❌ Invalid amount. Use /start.")
+
+def confirm_withdraw(m, amount):
+    if m.text.lower() in ["yes", "y", "হ্যাঁ"]:
+        # Ask for method
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("💳 Bkash", callback_data=f"wd_method|bkash|{amount}"))
         markup.add(InlineKeyboardButton("💳 Nagad", callback_data=f"wd_method|nagad|{amount}"))
         markup.add(InlineKeyboardButton("💳 Rocket", callback_data=f"wd_method|rocket|{amount}"))
         bot.send_message(m.chat.id, "📲 <b>Select withdrawal method:</b>", reply_markup=markup, parse_mode="HTML")
-    except:
-        bot.send_message(m.chat.id, "❌ Invalid amount. Use /start.")
+    else:
+        bot.send_message(m.chat.id, "❌ Withdrawal cancelled.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("wd_method|"))
 def withdraw_method_cb(call):
@@ -539,7 +575,7 @@ def process_withdraw_account(m, amount, method, original_chat_id):
     req_id = create_withdraw_request(m.from_user.id, amount, method, account)
     bot.send_message(m.chat.id, f"✅ <b>Withdrawal request submitted!</b>\nAmount: ${amount}\nRequest ID: <code>{req_id}</code>\n\nAdmin will process it.", parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "📈 My Investment")
+@bot.message_handler(func=lambda m: m.text == "📈 My Investments")
 def my_investments_btn(m):
     invs = get_user_investments(m.from_user.id)
     if not invs:
@@ -552,7 +588,7 @@ def my_investments_btn(m):
         text += f"Plan: {plan['name']} | Amount: ${inv['amount']} | Status: {inv['status']}\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "💸 Profit")
+@bot.message_handler(func=lambda m: m.text == "💸 Profit History")
 def profit_btn(m):
     user = get_user(m.from_user.id)
     profits = [t for t in user.get("transactions", []) if t["type"] == "profit"]
@@ -564,7 +600,7 @@ def profit_btn(m):
         text += f"${p['amount']} on {p['timestamp'][:10]}\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "🤝 Referral")
+@bot.message_handler(func=lambda m: m.text == "🤝 Referral Program")
 def referral_btn(m):
     bot_username = bot.get_me().username
     ref_link = f"https://t.me/{bot_username}?start={m.from_user.id}"
@@ -577,14 +613,14 @@ def referral_btn(m):
     markup.add(InlineKeyboardButton("📤 Share Link", switch_inline_query=ref_link))
     bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "👤 Profile")
+@bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile_btn(m):
     user = get_user(m.from_user.id)
     bal = user.get("balance", 0.0)
     text = f"👤 <b>Name:</b> {user.get('first_name', 'N/A')}\n🆔 <b>ID:</b> {m.from_user.id}\n💰 <b>Balance:</b> ${bal:.2f}\n📅 <b>Joined:</b> {user.get('joined', 'N/A')}"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "📩 Support")
+@bot.message_handler(func=lambda m: m.text == "📩 Support & Help")
 def support_btn(m):
     bot.send_message(m.chat.id, "📩 <b>For support contact:</b> @dark_princes12", parse_mode="HTML")
 
@@ -597,7 +633,8 @@ def admin_menu():
         "📊 Stats", "📢 Broadcast",
         "📦 Plans", "🛑 Ban",
         "👑 Add Admin", "🗑 Remove Admin",
-        "💸 Referral Control", "⚙ System Settings"
+        "💸 Referral Control", "⚙ System Settings",
+        "🔙 User Menu"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
@@ -608,6 +645,10 @@ def admin_panel(message):
         bot.send_message(message.chat.id, "⛔ Unauthorized.")
         return
     bot.send_message(message.chat.id, "🔧 <b>Admin Panel:</b>", reply_markup=admin_menu(), parse_mode="HTML")
+
+@bot.message_handler(func=lambda m: m.text == "🔙 User Menu" and is_admin(m.from_user.id))
+def back_to_user_menu(m):
+    bot.send_message(m.chat.id, "🔹 Main Menu:", reply_markup=main_menu())
 
 # ---------- Admin Handlers ----------
 @bot.message_handler(func=lambda m: m.text == "👥 Users" and is_admin(m.from_user.id))
