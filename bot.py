@@ -307,6 +307,25 @@ def main_menu():
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
 
+# ======================= WELCOME MESSAGE =======================
+def welcome_message(first_name):
+    return (
+        f"🌟 **স্বাগতম {first_name}!** 🌟\n\n"
+        "🎉 **NextInvest Bot** এ আপনাকে দেখে আমরা আনন্দিত!\n\n"
+        "🔹 **আপনি যা করতে পারবেন:**\n"
+        "✅ ডিপোজিট করে ব্যালান্স বাড়ান\n"
+        "✅ ইনভেস্ট করে লাভ করুন\n"
+        "✅ রেফারেল লিংক শেয়ার করে আয় করুন\n"
+        "✅ সহজেই উইথড্র করুন\n\n"
+        "💡 **প্রথম পদক্ষেপ:**\n"
+        "1️⃣ নিচের মেনু থেকে **💳 Deposit** বাটনে ক্লিক করুন\n"
+        "2️⃣ নির্দেশনা অনুযায়ী TXID ও পরিমাণ দিন\n"
+        "3️⃣ এডমিন অনুমোদন দিলে ব্যালান্স অ্যাড হবে\n"
+        "4️⃣ তারপর **🚀 Invest** করে ইনভেস্ট করুন\n\n"
+        "🎁 **বোনাস:** সাইনআপে $0.05, প্রতি রেফারে $0.01\n\n"
+        "🔽 **নিচের বাটন ব্যবহার করে শুরু করুন** 🔽"
+    )
+
 # ======================= COMMAND HANDLERS =======================
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
@@ -343,7 +362,7 @@ def start_cmd(message):
         add_transaction(user_id, "signup_bonus", 0.05, "completed")
         if ref_by and ref_by != user_id:
             add_referral(user_id, ref_by)
-        bot.send_message(message.chat.id, f"🎉 Welcome {message.from_user.first_name}!\nYou got $0.05 signup bonus.")
+        bot.send_message(message.chat.id, welcome_message(message.from_user.first_name), parse_mode="Markdown")
     else:
         bot.send_message(message.chat.id, f"👋 Welcome back {message.from_user.first_name}!")
 
