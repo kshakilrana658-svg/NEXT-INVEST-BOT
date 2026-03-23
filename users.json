@@ -14,6 +14,13 @@
         "status": "completed",
         "details": "",
         "timestamp": "2026-03-23T17:18:34.006395"
+      },
+      {
+        "type": "referral_bonus",
+        "amount": 0.01,
+        "status": "completed",
+        "details": "New user 7650251578",
+        "timestamp": "2026-03-23T17:20:11.508727"
       }
     ],
     "banned": false
