@@ -3,10 +3,15 @@ import json
 import requests
 import time
 import threading
+import logging
 from datetime import datetime, timedelta
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from flask import Flask
+
+# ======================= LOGGING =======================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ======================= CONFIGURATION =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -27,12 +32,17 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 def github_read(file_name):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    resp = requests.get(url, headers=headers)
-    if resp.status_code == 200:
-        import base64
-        content = base64.b64decode(resp.json()["content"]).decode("utf-8")
-        return json.loads(content)
-    else:
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            import base64
+            content = base64.b64decode(resp.json()["content"]).decode("utf-8")
+            return json.loads(content)
+        else:
+            logger.warning(f"GitHub read {file_name}: status {resp.status_code}")
+            return {}
+    except Exception as e:
+        logger.error(f"GitHub read error: {e}")
         return {}
 
 def github_write(file_name, data):
@@ -52,7 +62,10 @@ def github_write(file_name, data):
     if sha:
         payload["sha"] = sha
     put_resp = requests.put(url, headers=headers, json=payload)
-    return put_resp.status_code in [200, 201]
+    if put_resp.status_code not in [200, 201]:
+        logger.error(f"GitHub write {file_name}: {put_resp.status_code} - {put_resp.text}")
+        return False
+    return True
 
 # ======================= DATA LAYER =======================
 def get_user(user_id):
@@ -120,7 +133,7 @@ def is_user_banned(user_id):
     user = get_user(user_id)
     return user.get("banned", False) if user else False
 
-# ---------- Deposit Functions ----------
+# ---------- Deposit ----------
 def create_deposit_request(user_id, amount_bdt, txid):
     deposits = github_read("deposit.json")
     req_id = f"{user_id}_{int(time.time())}"
@@ -142,7 +155,7 @@ def approve_deposit(req_id):
     deposits = github_read("deposit.json")
     if req_id in deposits and deposits[req_id]["status"] == "pending":
         req = deposits[req_id]
-        usd_amount = req["amount_bdt"] / 130   # 1 USD = 130 BDT
+        usd_amount = req["amount_bdt"] / 130
         update_balance(req["user_id"], usd_amount, "add")
         add_transaction(req["user_id"], "deposit", usd_amount, "completed", f"Deposit of {req['amount_bdt']} BDT approved")
         deposits[req_id]["status"] = "approved"
@@ -153,12 +166,13 @@ def approve_deposit(req_id):
 def reject_deposit(req_id):
     deposits = github_read("deposit.json")
     if req_id in deposits and deposits[req_id]["status"] == "pending":
+        req = deposits[req_id]
         deposits[req_id]["status"] = "rejected"
         github_write("deposit.json", deposits)
-        return True, deposits[req_id]
+        return True, req
     return False, None
 
-# ---------- Withdraw Functions ----------
+# ---------- Withdraw ----------
 def create_withdraw_request(user_id, amount_usd, method, account):
     withdraws = github_read("withdraw.json")
     req_id = f"{user_id}_{int(time.time())}"
@@ -194,12 +208,13 @@ def approve_withdraw(req_id):
 def reject_withdraw(req_id):
     withdraws = github_read("withdraw.json")
     if req_id in withdraws and withdraws[req_id]["status"] == "pending":
+        req = withdraws[req_id]
         withdraws[req_id]["status"] = "rejected"
         github_write("withdraw.json", withdraws)
-        return True, withdraws[req_id]
+        return True, req
     return False, None
 
-# ---------- Investment Functions ----------
+# ---------- Investment ----------
 def get_plans():
     data = github_read("invest.json")
     if "plans" not in data:
@@ -248,6 +263,7 @@ def add_investment(user_id, plan_id, amount):
 def process_auto_profit():
     while True:
         time.sleep(86400)  # 24 hours
+        logger.info("Checking investments for profit...")
         data = github_read("invest.json")
         if "investments" not in data:
             continue
@@ -341,7 +357,7 @@ def verify_cb(call):
     else:
         bot.answer_callback_query(call.id, "Still not joined. Please join both.")
 
-# ------------------- MENU BUTTON HANDLERS -------------------
+# ------------------- MAIN BUTTON HANDLERS -------------------
 @bot.message_handler(func=lambda m: m.text == "📊 Plans")
 def plans_btn(m):
     plans = get_plans()
@@ -350,10 +366,8 @@ def plans_btn(m):
         text += f"🔹 {p['name']}\n   Profit: {p['profit_percent']}%\n   Duration: {p['duration_days']} days\n   Min: ${p['min_amount']}\n\n"
     bot.send_message(m.chat.id, text)
 
-# --- INVEST FIX ---
 @bot.message_handler(func=lambda m: m.text == "🚀 Invest")
 def invest_btn(m):
-    # Ask for plan and amount in one step
     plans = get_plans()
     plan_list = "\n".join([f"{pid}: {p['name']} (min ${p['min_amount']}, {p['profit_percent']}%)" for pid, p in plans.items()])
     msg = bot.send_message(m.chat.id, f"Send investment in format:\n<plan_id> <amount>\n\nAvailable plans:\n{plan_list}\n\nExample: basic 50")
@@ -378,10 +392,10 @@ def process_invest(m):
             bot.send_message(m.chat.id, f"✅ Investment of ${amount} in {plan['name']} successful!")
         else:
             bot.send_message(m.chat.id, "❌ Investment failed. Check balance or try again.")
-    except:
+    except Exception as e:
+        logger.error(f"Invest error: {e}")
         bot.send_message(m.chat.id, "Invalid format. Use: plan_id amount")
 
-# --- WALLET, DEPOSIT, WITHDRAW, etc. ---
 @bot.message_handler(func=lambda m: m.text == "💰 Wallet")
 def wallet_btn(m):
     bal = get_user_balance(m.from_user.id)
@@ -402,7 +416,6 @@ def process_deposit_txid(m):
     if not txid:
         bot.send_message(m.chat.id, "TXID cannot be empty. Please start deposit again.")
         return
-    # Store TXID temporarily
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[m.from_user.id] = {"txid": txid}
@@ -441,11 +454,11 @@ def process_withdraw_amount(m):
         if bal < amount:
             bot.send_message(m.chat.id, "Insufficient balance.")
             return
-        # Use inline keyboard for methods
+        # Inline keyboard for method selection
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("Bkash", callback_data=f"wd_method_bkash_{amount}"))
-        markup.add(InlineKeyboardButton("Nagad", callback_data=f"wd_method_nagad_{amount}"))
-        markup.add(InlineKeyboardButton("Rocket", callback_data=f"wd_method_rocket_{amount}"))
+        markup.add(InlineKeyboardButton("💳 Bkash", callback_data=f"wd_method_bkash_{amount}"))
+        markup.add(InlineKeyboardButton("💳 Nagad", callback_data=f"wd_method_nagad_{amount}"))
+        markup.add(InlineKeyboardButton("💳 Rocket", callback_data=f"wd_method_rocket_{amount}"))
         bot.send_message(m.chat.id, "Select withdrawal method:", reply_markup=markup)
     except:
         bot.send_message(m.chat.id, "Invalid amount. Use /start.")
@@ -456,7 +469,7 @@ def withdraw_method_cb(call):
     method = parts[2]
     amount = float(parts[3])
     # Ask for account number
-    msg = bot.send_message(call.message.chat.id, f"Enter your {method} account number:")
+    msg = bot.send_message(call.message.chat.id, f"Enter your {method.capitalize()} account number:")
     bot.register_next_step_handler(msg, lambda m: process_withdraw_account(m, amount, method, call.message.chat.id))
 
 def process_withdraw_account(m, amount, method, original_chat_id):
@@ -511,7 +524,7 @@ def profile_btn(m):
 def support_btn(m):
     bot.send_message(m.chat.id, "📩 For support contact: @dark_princes12")
 
-# ======================= ADMIN PANEL (KEYBOARD) =======================
+# ======================= ADMIN PANEL =======================
 def admin_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
@@ -565,7 +578,7 @@ def admin_deposits(m):
         markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep_{req_id}"),
                    InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep_{req_id}"))
         bot.send_message(m.chat.id,
-                         f"Deposit Request:\nUser: {req['user_id']}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}\nStatus: {req['status']}",
+                         f"Deposit Request:\nUser: {req['user_id']}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}",
                          reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and m.from_user.id == OWNER_ID)
@@ -616,7 +629,6 @@ def admin_plans(m):
     text = "Current Plans:\n"
     for pid, p in plans.items():
         text += f"{pid}: {p['name']} - {p['profit_percent']}%, {p['duration_days']} days, min ${p['min_amount']}\n"
-    text += "\nTo edit, use /admin_plans (not implemented in this demo)."
     bot.send_message(m.chat.id, text)
 
 @bot.message_handler(func=lambda m: m.text == "🛑 Ban" and m.from_user.id == OWNER_ID)
@@ -637,14 +649,14 @@ def ban_user(m):
     except:
         bot.send_message(m.chat.id, "Invalid user ID.")
 
-# ------------------- Admin Approve/Reject Callbacks -------------------
+# ------------------- Admin Approval Callbacks -------------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_dep_"))
 def approve_dep_cb(call):
     req_id = call.data.split("_")[3]
     success, req = approve_deposit(req_id)
     if success:
         bot.answer_callback_query(call.id, "Deposit approved.")
-        bot.edit_message_text("Deposit approved.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("✅ Deposit approved.", call.message.chat.id, call.message.message_id)
         # Notify user
         user_id = req["user_id"]
         bot.send_message(user_id, "✅ Your deposit has been approved! Balance updated.")
@@ -653,8 +665,8 @@ def approve_dep_cb(call):
         try:
             bot.send_message(FORCE_CHANNEL, msg_text)
             bot.send_message(FORCE_GROUP, msg_text)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Auto-post error: {e}")
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
@@ -664,15 +676,15 @@ def reject_dep_cb(call):
     success, req = reject_deposit(req_id)
     if success:
         bot.answer_callback_query(call.id, "Deposit rejected.")
-        bot.edit_message_text("Deposit rejected.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("❌ Deposit rejected.", call.message.chat.id, call.message.message_id)
         user_id = req["user_id"]
         bot.send_message(user_id, "❌ Your deposit request was rejected.")
         msg_text = f"❌ Deposit rejected!\nUser: {user_id}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}"
         try:
             bot.send_message(FORCE_CHANNEL, msg_text)
             bot.send_message(FORCE_GROUP, msg_text)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Auto-post error: {e}")
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
@@ -682,7 +694,7 @@ def approve_wd_cb(call):
     success, req = approve_withdraw(req_id)
     if success:
         bot.answer_callback_query(call.id, "Withdraw approved.")
-        bot.edit_message_text("Withdraw approved.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("✅ Withdraw approved.", call.message.chat.id, call.message.message_id)
         user_id = req["user_id"]
         amount = req["amount_usd"]
         bot.send_message(user_id, f"✅ Your withdrawal of ${amount} has been approved and sent.")
@@ -690,8 +702,8 @@ def approve_wd_cb(call):
         try:
             bot.send_message(FORCE_CHANNEL, msg_text)
             bot.send_message(FORCE_GROUP, msg_text)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Auto-post error: {e}")
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
@@ -701,15 +713,15 @@ def reject_wd_cb(call):
     success, req = reject_withdraw(req_id)
     if success:
         bot.answer_callback_query(call.id, "Withdraw rejected.")
-        bot.edit_message_text("Withdraw rejected.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("❌ Withdraw rejected.", call.message.chat.id, call.message.message_id)
         user_id = req["user_id"]
         bot.send_message(user_id, "❌ Your withdrawal request was rejected.")
         msg_text = f"❌ Withdrawal rejected!\nUser: {user_id}\nAmount: ${req['amount_usd']}\nMethod: {req['method']}"
         try:
             bot.send_message(FORCE_CHANNEL, msg_text)
             bot.send_message(FORCE_GROUP, msg_text)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Auto-post error: {e}")
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
@@ -729,5 +741,5 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 # ======================= START BOT =======================
 if __name__ == "__main__":
-    print("Bot started...")
+    logger.info("Bot started...")
     bot.infinity_polling()
