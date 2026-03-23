@@ -1,26 +1,26 @@
 import os
-import json
-import requests
-import time
-import threading
 import logging
+import threading
+import time
 from datetime import datetime, timedelta
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from flask import Flask
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
+from bson.objectid import ObjectId
 
 # ======================= LOGGING =======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ======================= CONFIGURATION =======================
+# ======================= CONFIGURATION (Environment) =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 FORCE_CHANNEL = os.environ.get("FORCE_CHANNEL", "")
 FORCE_GROUP = os.environ.get("FORCE_GROUP", "")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO")
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+MONGO_URI = os.environ.get("MONGO_URI")
+DB_NAME = os.environ.get("DB_NAME", "nextinvest")
 DEPOSIT_NUMBER = os.environ.get("DEPOSIT_NUMBER", "01309924182")
 
 # Rates
@@ -28,224 +28,214 @@ DEPOSIT_RATE_USD_TO_BDT = 130   # 1 USD = 130 BDT
 WITHDRAW_RATE_USD_TO_BDT = 110  # 1 USD = 110 BDT (for display)
 WITHDRAW_SERVICE_CHARGE_BDT = 10
 
-if not BOT_TOKEN or not OWNER_ID or not FORCE_CHANNEL or not FORCE_GROUP or not GITHUB_TOKEN or not GITHUB_REPO:
+if not BOT_TOKEN or not OWNER_ID or not FORCE_CHANNEL or not FORCE_GROUP or not MONGO_URI:
     raise ValueError("Missing required environment variables")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# ======================= GITHUB HELPER =======================
-def github_read(file_name):
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    try:
-        resp = requests.get(url, headers=headers)
-        if resp.status_code == 200:
-            import base64
-            content = base64.b64decode(resp.json()["content"]).decode("utf-8")
-            return json.loads(content)
-        else:
-            logger.warning(f"GitHub read {file_name}: status {resp.status_code}")
-            return {}
-    except Exception as e:
-        logger.error(f"GitHub read error: {e}")
-        return {}
+# ======================= MONGODB SETUP =======================
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
 
-def github_write(file_name, data):
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    get_resp = requests.get(url, headers=headers)
-    sha = None
-    if get_resp.status_code == 200:
-        sha = get_resp.json()["sha"]
-    import base64
-    content = base64.b64encode(json.dumps(data, indent=2).encode()).decode()
-    payload = {
-        "message": f"Update {file_name}",
-        "content": content,
-        "branch": GITHUB_BRANCH
-    }
-    if sha:
-        payload["sha"] = sha
-    put_resp = requests.put(url, headers=headers, json=payload)
-    if put_resp.status_code not in [200, 201]:
-        logger.error(f"GitHub write {file_name}: {put_resp.status_code} - {put_resp.text}")
-        return False
-    return True
+# Collections
+users_col = db["users"]
+deposits_col = db["deposits"]
+withdraws_col = db["withdraws"]
+investments_col = db["investments"]
+admins_col = db["admins"]
+settings_col = db["settings"]
 
-# ======================= DATA LAYER =======================
-# Files: users.json, deposit.json, withdraw.json, invest.json, admins.json, settings.json
+# Ensure indexes
+users_col.create_index("user_id", unique=True)
+deposits_col.create_index("request_id", unique=True)
+withdraws_col.create_index("request_id", unique=True)
+
+# Default settings if not present
+settings = settings_col.find_one({"_id": "global"})
+if not settings:
+    settings_col.insert_one({
+        "_id": "global",
+        "referral_bonus": 0.01,
+        "deposit_enabled": True,
+        "withdraw_enabled": True,
+        "maintenance_mode": False
+    })
+
+# Default plans if not present
+if investments_col.count_documents({"_id": "plans"}) == 0:
+    investments_col.insert_one({
+        "_id": "plans",
+        "plans": {
+            "basic": {"name": "Basic", "profit_percent": 20, "duration_days": 7, "min_amount": 10},
+            "premium": {"name": "Premium", "profit_percent": 30, "duration_days": 14, "min_amount": 50},
+            "gold": {"name": "Gold", "profit_percent": 40, "duration_days": 30, "min_amount": 100}
+        }
+    })
+
+# ======================= HELPER FUNCTIONS =======================
+def get_settings():
+    return settings_col.find_one({"_id": "global"})
+
+def update_settings(updates):
+    settings_col.update_one({"_id": "global"}, {"$set": updates})
+
+def get_plans():
+    doc = investments_col.find_one({"_id": "plans"})
+    return doc["plans"] if doc else {}
 
 def get_user(user_id):
-    users = github_read("users.json")
-    return users.get(str(user_id))
+    return users_col.find_one({"user_id": user_id})
 
-def save_user(user_id, user_data):
-    users = github_read("users.json")
-    users[str(user_id)] = user_data
-    github_write("users.json", users)
+def create_user(user_id, username, first_name, ref_by=None):
+    user_data = {
+        "user_id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "joined": datetime.utcnow(),
+        "balance": 0.05,  # signup bonus
+        "referred_by": ref_by,
+        "referrals": [],
+        "transactions": [],
+        "banned": False
+    }
+    try:
+        users_col.insert_one(user_data)
+        # Add referral if applicable
+        if ref_by and ref_by != user_id:
+            ref_user = users_col.find_one({"user_id": ref_by})
+            if ref_user:
+                bonus = get_settings()["referral_bonus"]
+                # Add bonus to referrer
+                users_col.update_one(
+                    {"user_id": ref_by},
+                    {"$inc": {"balance": bonus},
+                     "$push": {"referrals": user_id},
+                     "$push": {"transactions": {
+                         "type": "referral_bonus",
+                         "amount": bonus,
+                         "status": "completed",
+                         "details": f"New user {user_id}",
+                         "timestamp": datetime.utcnow()
+                     }}}
+                )
+        return user_data
+    except DuplicateKeyError:
+        return None
 
 def update_balance(user_id, amount, operation="add"):
-    users = github_read("users.json")
-    user = users.get(str(user_id), {})
+    """operation: 'add' or 'subtract'"""
+    user = users_col.find_one({"user_id": user_id})
+    if not user:
+        return False
     current = user.get("balance", 0.0)
-    if operation == "add":
-        current += amount
-    elif operation == "subtract":
-        current -= amount
-    user["balance"] = current
-    users[str(user_id)] = user
-    github_write("users.json", users)
-    return current
+    new_balance = current + amount if operation == "add" else current - amount
+    users_col.update_one({"user_id": user_id}, {"$set": {"balance": new_balance}})
+    # Add transaction record
+    txn = {
+        "type": "admin_add" if operation == "add" else "admin_remove",
+        "amount": amount,
+        "status": "completed",
+        "details": f"Balance {'added' if operation == 'add' else 'removed'} by admin",
+        "timestamp": datetime.utcnow()
+    }
+    users_col.update_one({"user_id": user_id}, {"$push": {"transactions": txn}})
+    return new_balance
 
 def add_transaction(user_id, txn_type, amount, status, details=""):
-    users = github_read("users.json")
-    user = users.get(str(user_id), {})
-    txn_list = user.get("transactions", [])
-    txn_list.append({
-        "type": txn_type,
-        "amount": amount,
-        "status": status,
-        "details": details,
-        "timestamp": datetime.now().isoformat()
-    })
-    if len(txn_list) > 50:
-        txn_list = txn_list[-50:]
-    user["transactions"] = txn_list
-    users[str(user_id)] = user
-    github_write("users.json", users)
-
-def add_referral(new_user_id, ref_by):
-    if ref_by == new_user_id:
-        return False
-    settings = github_read("settings.json")
-    referral_bonus = settings.get("referral_bonus", 0.01)
-    users = github_read("users.json")
-    ref_user = users.get(str(ref_by), {})
-    referrals = ref_user.get("referrals", [])
-    if new_user_id not in referrals:
-        referrals.append(new_user_id)
-        ref_user["referrals"] = referrals
-        users[str(ref_by)] = ref_user
-        update_balance(ref_by, referral_bonus, "add")
-        add_transaction(ref_by, "referral_bonus", referral_bonus, "completed", f"New user {new_user_id}")
-    new_user = users.get(str(new_user_id), {})
-    new_user["referred_by"] = ref_by
-    users[str(new_user_id)] = new_user
-    github_write("users.json", users)
-    return True
-
-def get_user_balance(user_id):
-    user = get_user(user_id)
-    return user.get("balance", 0.0) if user else 0.0
-
-def is_user_banned(user_id):
-    user = get_user(user_id)
-    return user.get("banned", False) if user else False
+    users_col.update_one(
+        {"user_id": user_id},
+        {"$push": {"transactions": {
+            "type": txn_type,
+            "amount": amount,
+            "status": status,
+            "details": details,
+            "timestamp": datetime.utcnow()
+        }}}
+    )
 
 def is_admin(user_id):
     if user_id == OWNER_ID:
         return True
-    admins = github_read("admins.json")
-    return str(user_id) in admins.get("admins", [])
+    return admins_col.find_one({"user_id": user_id}) is not None
+
+def is_banned(user_id):
+    user = users_col.find_one({"user_id": user_id})
+    return user.get("banned", False) if user else False
 
 # ---------- Deposit ----------
 def create_deposit_request(user_id, amount_bdt, txid):
-    deposits = github_read("deposit.json")
-    req_id = f"{user_id}_{int(time.time())}"
-    deposits[req_id] = {
+    request_id = f"{user_id}_{int(time.time())}"
+    deposit = {
+        "request_id": request_id,
         "user_id": user_id,
         "amount_bdt": amount_bdt,
         "txid": txid,
         "status": "pending",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.utcnow()
     }
-    github_write("deposit.json", deposits)
-    return req_id
+    deposits_col.insert_one(deposit)
+    return request_id
 
 def get_pending_deposits():
-    deposits = github_read("deposit.json")
-    return {k: v for k, v in deposits.items() if v["status"] == "pending"}
+    return list(deposits_col.find({"status": "pending"}))
 
-def approve_deposit(req_id):
-    deposits = github_read("deposit.json")
-    if req_id in deposits and deposits[req_id]["status"] == "pending":
-        req = deposits[req_id]
-        usd_amount = req["amount_bdt"] / DEPOSIT_RATE_USD_TO_BDT
-        update_balance(req["user_id"], usd_amount, "add")
-        add_transaction(req["user_id"], "deposit", usd_amount, "completed", f"Deposit of {req['amount_bdt']} BDT approved")
-        deposits[req_id]["status"] = "approved"
-        github_write("deposit.json", deposits)
-        return True, req
-    return False, None
+def approve_deposit(request_id):
+    deposit = deposits_col.find_one({"request_id": request_id, "status": "pending"})
+    if not deposit:
+        return False, None
+    # Update balance: convert BDT to USD
+    usd_amount = deposit["amount_bdt"] / DEPOSIT_RATE_USD_TO_BDT
+    users_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"balance": usd_amount}})
+    add_transaction(deposit["user_id"], "deposit", usd_amount, "completed", f"Deposit of {deposit['amount_bdt']} BDT approved")
+    deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "approved"}})
+    return True, deposit
 
-def reject_deposit(req_id):
-    deposits = github_read("deposit.json")
-    if req_id in deposits and deposits[req_id]["status"] == "pending":
-        req = deposits[req_id]
-        deposits[req_id]["status"] = "rejected"
-        github_write("deposit.json", deposits)
-        return True, req
-    return False, None
+def reject_deposit(request_id):
+    deposit = deposits_col.find_one({"request_id": request_id, "status": "pending"})
+    if not deposit:
+        return False, None
+    deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "rejected"}})
+    return True, deposit
 
 # ---------- Withdraw ----------
 def create_withdraw_request(user_id, amount_usd, method, account):
-    withdraws = github_read("withdraw.json")
-    req_id = f"{user_id}_{int(time.time())}"
-    withdraws[req_id] = {
+    request_id = f"{user_id}_{int(time.time())}"
+    withdraw = {
+        "request_id": request_id,
         "user_id": user_id,
         "amount_usd": amount_usd,
         "method": method,
         "account": account,
         "status": "pending",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.utcnow()
     }
-    github_write("withdraw.json", withdraws)
-    return req_id
+    withdraws_col.insert_one(withdraw)
+    return request_id
 
 def get_pending_withdraws():
-    withdraws = github_read("withdraw.json")
-    return {k: v for k, v in withdraws.items() if v["status"] == "pending"}
+    return list(withdraws_col.find({"status": "pending"}))
 
-def approve_withdraw(req_id):
-    withdraws = github_read("withdraw.json")
-    if req_id in withdraws and withdraws[req_id]["status"] == "pending":
-        req = withdraws[req_id]
-        new_bal = update_balance(req["user_id"], req["amount_usd"], "subtract")
-        if new_bal < 0:
-            update_balance(req["user_id"], req["amount_usd"], "add")
-            return False, None
-        add_transaction(req["user_id"], "withdraw", req["amount_usd"], "completed", "Withdraw approved")
-        withdraws[req_id]["status"] = "approved"
-        github_write("withdraw.json", withdraws)
-        return True, req
-    return False, None
+def approve_withdraw(request_id):
+    withdraw = withdraws_col.find_one({"request_id": request_id, "status": "pending"})
+    if not withdraw:
+        return False, None
+    # Deduct balance
+    user = users_col.find_one({"user_id": withdraw["user_id"]})
+    if user["balance"] < withdraw["amount_usd"]:
+        return False, None
+    users_col.update_one({"user_id": withdraw["user_id"]}, {"$inc": {"balance": -withdraw["amount_usd"]}})
+    add_transaction(withdraw["user_id"], "withdraw", withdraw["amount_usd"], "completed", "Withdraw approved")
+    withdraws_col.update_one({"request_id": request_id}, {"$set": {"status": "approved"}})
+    return True, withdraw
 
-def reject_withdraw(req_id):
-    withdraws = github_read("withdraw.json")
-    if req_id in withdraws and withdraws[req_id]["status"] == "pending":
-        req = withdraws[req_id]
-        withdraws[req_id]["status"] = "rejected"
-        github_write("withdraw.json", withdraws)
-        return True, req
-    return False, None
+def reject_withdraw(request_id):
+    withdraw = withdraws_col.find_one({"request_id": request_id, "status": "pending"})
+    if not withdraw:
+        return False, None
+    withdraws_col.update_one({"request_id": request_id}, {"$set": {"status": "rejected"}})
+    return True, withdraw
 
 # ---------- Investment ----------
-def get_plans():
-    data = github_read("invest.json")
-    if "plans" not in data:
-        data["plans"] = {
-            "basic": {"name": "Basic", "profit_percent": 20, "duration_days": 7, "min_amount": 10},
-            "premium": {"name": "Premium", "profit_percent": 30, "duration_days": 14, "min_amount": 50},
-            "gold": {"name": "Gold", "profit_percent": 40, "duration_days": 30, "min_amount": 100}
-        }
-        github_write("invest.json", data)
-    return data["plans"]
-
-def get_user_investments(user_id):
-    data = github_read("invest.json")
-    investments = data.get("investments", {})
-    return investments.get(str(user_id), [])
-
 def add_investment(user_id, plan_id, amount):
     plans = get_plans()
     if plan_id not in plans:
@@ -253,70 +243,43 @@ def add_investment(user_id, plan_id, amount):
     plan = plans[plan_id]
     if amount < plan["min_amount"]:
         return False
-    user_balance = get_user_balance(user_id)
-    if user_balance < amount:
+    user = users_col.find_one({"user_id": user_id})
+    if user["balance"] < amount:
         return False
-    update_balance(user_id, amount, "subtract")
-    data = github_read("invest.json")
-    if "investments" not in data:
-        data["investments"] = {}
-    user_invs = data["investments"].get(str(user_id), [])
-    end_date = datetime.now() + timedelta(days=plan["duration_days"])
-    user_invs.append({
+    # Deduct balance
+    users_col.update_one({"user_id": user_id}, {"$inc": {"balance": -amount}})
+    add_transaction(user_id, "investment", amount, "completed", f"Invested in {plan['name']}")
+    # Save investment
+    end_date = datetime.utcnow() + timedelta(days=plan["duration_days"])
+    inv_doc = {
+        "user_id": user_id,
         "plan_id": plan_id,
         "amount": amount,
-        "start_date": datetime.now().isoformat(),
-        "end_date": end_date.isoformat(),
+        "start_date": datetime.utcnow(),
+        "end_date": end_date,
         "status": "active",
         "profit_added": False
-    })
-    data["investments"][str(user_id)] = user_invs
-    github_write("invest.json", data)
-    add_transaction(user_id, "investment", amount, "completed", f"Invested in {plan['name']}")
+    }
+    investments_col.insert_one(inv_doc)
     return True
 
 def process_auto_profit():
     while True:
         time.sleep(86400)  # 24 hours
         logger.info("Checking investments for profit...")
-        data = github_read("invest.json")
-        if "investments" not in data:
-            continue
-        changed = False
-        for uid_str, inv_list in data["investments"].items():
-            uid = int(uid_str)
-            for inv in inv_list:
-                if inv["status"] == "active" and not inv.get("profit_added", False):
-                    end_date = datetime.fromisoformat(inv["end_date"])
-                    if datetime.now() >= end_date:
-                        profit = inv["amount"] * (get_plans()[inv["plan_id"]]["profit_percent"] / 100)
-                        update_balance(uid, profit, "add")
-                        add_transaction(uid, "profit", profit, "completed", f"Profit from {inv['plan_id']} investment")
-                        inv["status"] = "completed"
-                        inv["profit_added"] = True
-                        changed = True
-        if changed:
-            github_write("invest.json", data)
+        now = datetime.utcnow()
+        active_invs = investments_col.find({"status": "active", "profit_added": False})
+        for inv in active_invs:
+            if now >= inv["end_date"]:
+                plans = get_plans()
+                plan = plans.get(inv["plan_id"])
+                if plan:
+                    profit = inv["amount"] * (plan["profit_percent"] / 100)
+                    users_col.update_one({"user_id": inv["user_id"]}, {"$inc": {"balance": profit}})
+                    add_transaction(inv["user_id"], "profit", profit, "completed", f"Profit from {plan['name']} investment")
+                    investments_col.update_one({"_id": inv["_id"]}, {"$set": {"status": "completed", "profit_added": True}})
 
 threading.Thread(target=process_auto_profit, daemon=True).start()
-
-# ---------- Settings ----------
-def get_settings():
-    settings = github_read("settings.json")
-    if not settings:
-        settings = {
-            "referral_bonus": 0.01,
-            "deposit_enabled": True,
-            "withdraw_enabled": True,
-            "maintenance_mode": False
-        }
-        github_write("settings.json", settings)
-    return settings
-
-def update_settings(key, value):
-    settings = get_settings()
-    settings[key] = value
-    github_write("settings.json", settings)
 
 # ======================= FORCE JOIN CHECK =======================
 def is_joined(user_id):
@@ -367,7 +330,7 @@ def start_cmd(message):
     if settings.get("maintenance_mode", False) and not is_admin(user_id):
         bot.send_message(message.chat.id, "🔧 Bot is under maintenance. Please try again later.")
         return
-    if is_user_banned(user_id):
+    if is_banned(user_id):
         bot.send_message(message.chat.id, "⛔ You are banned from using this bot.")
         return
     if not is_joined(user_id):
@@ -384,24 +347,15 @@ def start_cmd(message):
         ref_by = None
         if len(ref_param) > 1 and ref_param[1].isdigit():
             ref_by = int(ref_param[1])
-        user_data = {
-            "id": user_id,
-            "username": message.from_user.username,
-            "first_name": message.from_user.first_name,
-            "joined": datetime.now().isoformat(),
-            "balance": 0.05,
-            "referred_by": None,
-            "referrals": [],
-            "transactions": [],
-            "banned": False
-        }
-        save_user(user_id, user_data)
-        add_transaction(user_id, "signup_bonus", 0.05, "completed")
-        if ref_by and ref_by != user_id:
-            add_referral(user_id, ref_by)
+        user = create_user(
+            user_id,
+            message.from_user.username,
+            message.from_user.first_name,
+            ref_by
+        )
         bot.send_message(message.chat.id, welcome_message(message.from_user.first_name), parse_mode="HTML")
     else:
-        bot.send_message(message.chat.id, f"👋 Welcome back {message.from_user.first_name}!")
+        bot.send_message(message.chat.id, f"👋 Welcome back {user['first_name']}!")
 
     bot.send_message(message.chat.id, "🔹 Main Menu:", reply_markup=main_menu())
 
@@ -458,8 +412,11 @@ def process_invest(m):
 
 @bot.message_handler(func=lambda m: m.text == "💰 My Wallet")
 def wallet_btn(m):
-    bal = get_user_balance(m.from_user.id)
     user = get_user(m.from_user.id)
+    if not user:
+        bot.send_message(m.chat.id, "❌ User not found. Use /start.")
+        return
+    bal = user.get("balance", 0.0)
     transactions = user.get("transactions", [])[-5:]
     text = f"💰 <b>Balance:</b> ${bal:.2f}\n\n<b>📜 Last 5 Transactions:</b>\n"
     for t in transactions[::-1]:
@@ -472,7 +429,6 @@ def deposit_btn(m):
     if not settings.get("deposit_enabled", True):
         bot.send_message(m.chat.id, "❌ Deposit is currently disabled by admin.")
         return
-    # Show rate info
     info = f"💱 <b>Deposit Rate:</b> 1 USD = {DEPOSIT_RATE_USD_TO_BDT} BDT\n"
     msg = bot.send_message(m.chat.id, info + f"📱 <b>Send Money / Cash In</b>\nNumber: <code>{DEPOSIT_NUMBER}</code>\n\nAfter sending, <b>enter the TXID</b>:", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_txid)
@@ -494,10 +450,8 @@ def process_deposit_amount(m):
         if amount_bdt <= 0:
             raise ValueError
         usd_amount = amount_bdt / DEPOSIT_RATE_USD_TO_BDT
-        # Show conversion
         confirm = f"✅ You sent {amount_bdt} BDT → will receive ${usd_amount:.2f} USD.\n\nConfirm? (yes/no)"
         msg = bot.send_message(m.chat.id, confirm)
-        # Store temp data
         bot.temp_deposit[m.from_user.id]["amount_bdt"] = amount_bdt
         bot.register_next_step_handler(msg, lambda m2: confirm_deposit(m2, m.from_user.id))
     except:
@@ -514,7 +468,6 @@ def confirm_deposit(m, user_id):
             return
         req_id = create_deposit_request(user_id, amount_bdt, txid)
         bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\nAmount: {amount_bdt} BDT\nTXID: <code>{txid}</code>\nRequest ID: <code>{req_id}</code>\n\nAdmin will review it.", parse_mode="HTML")
-        # Clean up temp
         del bot.temp_deposit[user_id]
     else:
         bot.send_message(m.chat.id, "❌ Deposit cancelled.")
@@ -537,11 +490,10 @@ def process_withdraw_amount(m):
         if amount < 5:
             bot.send_message(m.chat.id, "❌ Minimum withdraw amount is $5.")
             return
-        bal = get_user_balance(m.from_user.id)
-        if bal < amount:
+        user = get_user(m.from_user.id)
+        if user["balance"] < amount:
             bot.send_message(m.chat.id, "❌ Insufficient balance.")
             return
-        # Show estimated BDT after charge
         estimated_bdt = amount * WITHDRAW_RATE_USD_TO_BDT - WITHDRAW_SERVICE_CHARGE_BDT
         if estimated_bdt < 0:
             estimated_bdt = 0
@@ -553,7 +505,6 @@ def process_withdraw_amount(m):
 
 def confirm_withdraw(m, amount):
     if m.text.lower() in ["yes", "y", "হ্যাঁ"]:
-        # Ask for method
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("💳 Bkash", callback_data=f"wd_method|bkash|{amount}"))
         markup.add(InlineKeyboardButton("💳 Nagad", callback_data=f"wd_method|nagad|{amount}"))
@@ -577,7 +528,7 @@ def process_withdraw_account(m, amount, method, original_chat_id):
 
 @bot.message_handler(func=lambda m: m.text == "📈 My Investments")
 def my_investments_btn(m):
-    invs = get_user_investments(m.from_user.id)
+    invs = list(investments_col.find({"user_id": m.from_user.id}))
     if not invs:
         bot.send_message(m.chat.id, "📭 You have no investments.")
         return
@@ -597,7 +548,7 @@ def profit_btn(m):
         return
     text = "💸 <b>Last 5 Profits:</b>\n"
     for p in profits[-5:]:
-        text += f"${p['amount']} on {p['timestamp'][:10]}\n"
+        text += f"${p['amount']} on {p['timestamp'].strftime('%Y-%m-%d')}\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🤝 Referral Program")
@@ -616,8 +567,12 @@ def referral_btn(m):
 @bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile_btn(m):
     user = get_user(m.from_user.id)
+    if not user:
+        bot.send_message(m.chat.id, "❌ User not found. Use /start.")
+        return
     bal = user.get("balance", 0.0)
-    text = f"👤 <b>Name:</b> {user.get('first_name', 'N/A')}\n🆔 <b>ID:</b> {m.from_user.id}\n💰 <b>Balance:</b> ${bal:.2f}\n📅 <b>Joined:</b> {user.get('joined', 'N/A')}"
+    referrals = user.get("referrals", [])
+    text = f"👤 <b>Name:</b> {user.get('first_name', 'N/A')}\n🆔 <b>ID:</b> {m.from_user.id}\n💰 <b>Balance:</b> ${bal:.2f}\n👥 <b>Referrals:</b> {len(referrals)}\n📅 <b>Joined:</b> {user.get('joined', datetime.utcnow()).strftime('%Y-%m-%d')}"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📩 Support & Help")
@@ -653,25 +608,29 @@ def back_to_user_menu(m):
 # ---------- Admin Handlers ----------
 @bot.message_handler(func=lambda m: m.text == "👥 Users" and is_admin(m.from_user.id))
 def admin_users(m):
-    users = github_read("users.json")
-    text = f"👥 <b>Total Users:</b> {len(users)}\n"
-    for uid, u in list(users.items())[:10]:
-        text += f"{uid} - {u.get('first_name')} (${u.get('balance',0)})\n"
+    users = list(users_col.find().limit(10))
+    text = f"👥 <b>Total Users:</b> {users_col.count_documents({})}\n"
+    for u in users:
+        text += f"{u['user_id']} - {u.get('first_name', 'N/A')} (${u.get('balance',0)})\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "💰 Balance" and is_admin(m.from_user.id))
 def admin_balance(m):
-    msg = bot.send_message(m.chat.id, "💸 <b>Send:</b> <code>user_id amount</code> (e.g., 123456 10)", parse_mode="HTML")
-    bot.register_next_step_handler(msg, add_balance_admin)
+    msg = bot.send_message(m.chat.id, "💸 <b>Send:</b> <code>user_id amount</code> to add, or <code>user_id -amount</code> to remove.\nExample: <code>123456 10</code> or <code>123456 -10</code>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, balance_admin)
 
-def add_balance_admin(m):
+def balance_admin(m):
     try:
         parts = m.text.split()
         uid = int(parts[0])
         amt = float(parts[1])
-        update_balance(uid, amt, "add")
-        add_transaction(uid, "admin_add", amt, "completed", "Added by admin")
-        bot.send_message(m.chat.id, f"✅ Added ${amt} to user {uid}")
+        if amt > 0:
+            update_balance(uid, amt, "add")
+            msg = f"✅ Added ${amt} to user {uid}"
+        else:
+            update_balance(uid, abs(amt), "subtract")
+            msg = f"✅ Removed ${abs(amt)} from user {uid}"
+        bot.send_message(m.chat.id, msg)
     except:
         bot.send_message(m.chat.id, "❌ Invalid format. Use: user_id amount")
 
@@ -681,12 +640,12 @@ def admin_deposits(m):
     if not pending:
         bot.send_message(m.chat.id, "📭 No pending deposits.")
         return
-    for req_id, req in pending.items():
+    for dep in pending:
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{req_id}"),
-                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{req_id}"))
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
         bot.send_message(m.chat.id,
-                         f"📥 <b>Deposit Request</b>\nUser: <code>{req['user_id']}</code>\nAmount: {req['amount_bdt']} BDT\nTXID: <code>{req['txid']}</code>",
+                         f"📥 <b>Deposit Request</b>\nUser: <code>{dep['user_id']}</code>\nAmount: {dep['amount_bdt']} BDT\nTXID: <code>{dep['txid']}</code>",
                          reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and is_admin(m.from_user.id))
@@ -695,23 +654,20 @@ def admin_withdraws(m):
     if not pending:
         bot.send_message(m.chat.id, "📭 No pending withdrawals.")
         return
-    for req_id, req in pending.items():
+    for wd in pending:
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{req_id}"),
-                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{req_id}"))
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
         bot.send_message(m.chat.id,
-                         f"📤 <b>Withdraw Request</b>\nUser: <code>{req['user_id']}</code>\nAmount: ${req['amount_usd']}\nMethod: {req['method']}\nAccount: <code>{req['account']}</code>",
+                         f"📤 <b>Withdraw Request</b>\nUser: <code>{wd['user_id']}</code>\nAmount: ${wd['amount_usd']}\nMethod: {wd['method']}\nAccount: <code>{wd['account']}</code>",
                          reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats" and is_admin(m.from_user.id))
 def admin_stats(m):
-    users = github_read("users.json")
-    total_balance = sum(u.get("balance", 0) for u in users.values())
-    inv_data = github_read("invest.json")
-    total_invested = 0
-    for invs in inv_data.get("investments", {}).values():
-        total_invested += sum(i["amount"] for i in invs)
-    text = f"📊 <b>Stats:</b>\n👥 Users: {len(users)}\n💰 Total Balance: ${total_balance:.2f}\n💸 Total Invested: ${total_invested:.2f}"
+    total_users = users_col.count_documents({})
+    total_balance = sum(u.get("balance", 0) for u in users_col.find())
+    total_invested = sum(inv["amount"] for inv in investments_col.find({"status": "active"}))
+    text = f"📊 <b>Stats:</b>\n👥 Users: {total_users}\n💰 Total Balance: ${total_balance:.2f}\n💸 Total Invested: ${total_invested:.2f}"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📢 Broadcast" and is_admin(m.from_user.id))
@@ -721,11 +677,10 @@ def admin_broadcast(m):
 
 def broadcast_msg(m):
     text = m.text
-    users = github_read("users.json")
     count = 0
-    for uid in users.keys():
+    for user in users_col.find():
         try:
-            bot.send_message(int(uid), text)
+            bot.send_message(user["user_id"], text)
             count += 1
         except:
             pass
@@ -737,6 +692,7 @@ def admin_plans(m):
     text = "📦 <b>Current Plans:</b>\n"
     for pid, p in plans.items():
         text += f"{pid}: {p['name']} - {p['profit_percent']}%, {p['duration_days']} days, min ${p['min_amount']}\n"
+    text += "\nTo edit, use MongoDB directly (not implemented in this demo)."
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 Ban" and is_admin(m.from_user.id))
@@ -747,10 +703,8 @@ def admin_ban(m):
 def ban_user(m):
     try:
         uid = int(m.text)
-        users = github_read("users.json")
-        if str(uid) in users:
-            users[str(uid)]["banned"] = True
-            github_write("users.json", users)
+        result = users_col.update_one({"user_id": uid}, {"$set": {"banned": True}})
+        if result.modified_count:
             bot.send_message(m.chat.id, f"✅ User {uid} banned.")
         else:
             bot.send_message(m.chat.id, "❌ User not found.")
@@ -765,15 +719,11 @@ def admin_add_admin(m):
 def add_admin(m):
     try:
         uid = int(m.text)
-        admins = github_read("admins.json")
-        if "admins" not in admins:
-            admins["admins"] = []
-        if str(uid) not in admins["admins"]:
-            admins["admins"].append(str(uid))
-            github_write("admins.json", admins)
-            bot.send_message(m.chat.id, f"✅ User {uid} is now an admin.")
-        else:
+        if admins_col.find_one({"user_id": uid}):
             bot.send_message(m.chat.id, f"❌ User {uid} is already an admin.")
+            return
+        admins_col.insert_one({"user_id": uid})
+        bot.send_message(m.chat.id, f"✅ User {uid} is now an admin.")
     except:
         bot.send_message(m.chat.id, "❌ Invalid user ID.")
 
@@ -788,12 +738,8 @@ def remove_admin(m):
         if uid == OWNER_ID:
             bot.send_message(m.chat.id, "❌ Cannot remove the owner.")
             return
-        admins = github_read("admins.json")
-        if "admins" not in admins:
-            admins["admins"] = []
-        if str(uid) in admins["admins"]:
-            admins["admins"].remove(str(uid))
-            github_write("admins.json", admins)
+        result = admins_col.delete_one({"user_id": uid})
+        if result.deleted_count:
             bot.send_message(m.chat.id, f"✅ User {uid} is no longer an admin.")
         else:
             bot.send_message(m.chat.id, f"❌ User {uid} is not an admin.")
@@ -812,7 +758,7 @@ def set_referral_bonus(m):
         new_bonus = float(m.text)
         if new_bonus <= 0:
             raise ValueError
-        update_settings("referral_bonus", new_bonus)
+        update_settings({"referral_bonus": new_bonus})
         bot.send_message(m.chat.id, f"✅ Referral bonus updated to ${new_bonus}.")
     except:
         bot.send_message(m.chat.id, "❌ Invalid amount. Please send a number > 0.")
@@ -844,38 +790,64 @@ def sys_toggle_cb(call):
     settings = get_settings()
     if action == "deposit":
         settings["deposit_enabled"] = not settings.get("deposit_enabled", True)
-        update_settings("deposit_enabled", settings["deposit_enabled"])
+        update_settings({"deposit_enabled": settings["deposit_enabled"]})
         msg = "Deposit is now " + ("✅ enabled" if settings["deposit_enabled"] else "❌ disabled")
     elif action == "withdraw":
         settings["withdraw_enabled"] = not settings.get("withdraw_enabled", True)
-        update_settings("withdraw_enabled", settings["withdraw_enabled"])
+        update_settings({"withdraw_enabled": settings["withdraw_enabled"]})
         msg = "Withdraw is now " + ("✅ enabled" if settings["withdraw_enabled"] else "❌ disabled")
     elif action == "maintenance":
         settings["maintenance_mode"] = not settings.get("maintenance_mode", False)
-        update_settings("maintenance_mode", settings["maintenance_mode"])
+        update_settings({"maintenance_mode": settings["maintenance_mode"]})
         msg = "Maintenance mode is now " + ("🔧 ON" if settings["maintenance_mode"] else "✅ OFF")
     else:
         msg = "Unknown action"
     bot.answer_callback_query(call.id, msg)
     bot.edit_message_text("✅ Settings updated. Use /admin again to see changes.", call.message.chat.id, call.message.message_id)
 
-# ------------------- Admin Approval Callbacks -------------------
+# ------------------- Admin Approval Callbacks (with formatted auto-posts) -------------------
+def format_auto_post(action, type_, user_id, amount, txid=None, method=None, account=None):
+    if type_ == "deposit":
+        if action == "approve":
+            emoji = "✅"
+            title = "Deposit Approved"
+            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>"
+        else:
+            emoji = "❌"
+            title = "Deposit Rejected"
+            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>"
+    else:
+        if action == "approve":
+            emoji = "✅"
+            title = "Withdrawal Approved"
+            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method}\n📞 Account: <code>{account}</code>"
+        else:
+            emoji = "❌"
+            title = "Withdrawal Rejected"
+            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method}\n📞 Account: <code>{account}</code>"
+    user_link = f'<a href="tg://user?id={user_id}">User {user_id}</a>'
+    return (
+        f"{emoji} <b>{title}</b> {emoji}\n\n"
+        f"👤 {user_link}\n"
+        f"{details}\n\n"
+        f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    )
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_dep|"))
 def approve_dep_cb(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    success, req = approve_deposit(req_id)
+    success, dep = approve_deposit(req_id)
     if success:
         bot.answer_callback_query(call.id, "✅ Deposit approved!")
         bot.edit_message_text("✅ Deposit approved.", call.message.chat.id, call.message.message_id)
-        user_id = req["user_id"]
-        bot.send_message(user_id, "✅ Your deposit has been approved! Balance updated.")
-        msg_text = f"📢 Deposit approved!\nUser: {user_id}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}"
+        bot.send_message(dep["user_id"], "✅ Your deposit has been approved! Balance updated.")
+        msg_text = format_auto_post("approve", "deposit", dep["user_id"], dep["amount_bdt"], txid=dep["txid"])
         try:
-            bot.send_message(FORCE_CHANNEL, msg_text)
-            bot.send_message(FORCE_GROUP, msg_text)
+            bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+            bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Auto-post error: {e}")
     else:
@@ -887,16 +859,15 @@ def reject_dep_cb(call):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    success, req = reject_deposit(req_id)
+    success, dep = reject_deposit(req_id)
     if success:
         bot.answer_callback_query(call.id, "❌ Deposit rejected.")
         bot.edit_message_text("❌ Deposit rejected.", call.message.chat.id, call.message.message_id)
-        user_id = req["user_id"]
-        bot.send_message(user_id, "❌ Your deposit request was rejected.")
-        msg_text = f"❌ Deposit rejected!\nUser: {user_id}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}"
+        bot.send_message(dep["user_id"], "❌ Your deposit request was rejected.")
+        msg_text = format_auto_post("reject", "deposit", dep["user_id"], dep["amount_bdt"], txid=dep["txid"])
         try:
-            bot.send_message(FORCE_CHANNEL, msg_text)
-            bot.send_message(FORCE_GROUP, msg_text)
+            bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+            bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Auto-post error: {e}")
     else:
@@ -908,17 +879,15 @@ def approve_wd_cb(call):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    success, req = approve_withdraw(req_id)
+    success, wd = approve_withdraw(req_id)
     if success:
         bot.answer_callback_query(call.id, "✅ Withdraw approved!")
         bot.edit_message_text("✅ Withdraw approved.", call.message.chat.id, call.message.message_id)
-        user_id = req["user_id"]
-        amount = req["amount_usd"]
-        bot.send_message(user_id, f"✅ Your withdrawal of ${amount} has been approved and sent.")
-        msg_text = f"📢 Withdrawal approved!\nUser: {user_id}\nAmount: ${amount}\nMethod: {req['method']}\nAccount: {req['account']}"
+        bot.send_message(wd["user_id"], f"✅ Your withdrawal of ${wd['amount_usd']} has been approved and sent.")
+        msg_text = format_auto_post("approve", "withdraw", wd["user_id"], wd["amount_usd"], method=wd["method"], account=wd["account"])
         try:
-            bot.send_message(FORCE_CHANNEL, msg_text)
-            bot.send_message(FORCE_GROUP, msg_text)
+            bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+            bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Auto-post error: {e}")
     else:
@@ -930,16 +899,15 @@ def reject_wd_cb(call):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    success, req = reject_withdraw(req_id)
+    success, wd = reject_withdraw(req_id)
     if success:
         bot.answer_callback_query(call.id, "❌ Withdraw rejected.")
         bot.edit_message_text("❌ Withdraw rejected.", call.message.chat.id, call.message.message_id)
-        user_id = req["user_id"]
-        bot.send_message(user_id, "❌ Your withdrawal request was rejected.")
-        msg_text = f"❌ Withdrawal rejected!\nUser: {user_id}\nAmount: ${req['amount_usd']}\nMethod: {req['method']}"
+        bot.send_message(wd["user_id"], "❌ Your withdrawal request was rejected.")
+        msg_text = format_auto_post("reject", "withdraw", wd["user_id"], wd["amount_usd"], method=wd["method"], account=wd["account"])
         try:
-            bot.send_message(FORCE_CHANNEL, msg_text)
-            bot.send_message(FORCE_GROUP, msg_text)
+            bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+            bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Auto-post error: {e}")
     else:
