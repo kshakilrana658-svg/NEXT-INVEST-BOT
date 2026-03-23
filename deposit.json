@@ -6,5 +6,12 @@
     "screenshot_file_id": "AgACAgUAAxkBAAO3acF2m_M-GoHLOojytSfoKQ390vAAAocQaxtAlghWRBYnXOvV3EYBAAMCAAN5AAM6BA",
     "status": "pending",
     "timestamp": "2026-03-23T17:23:14.174519"
+  },
+  "6919025708_1774289724": {
+    "user_id": 6919025708,
+    "amount_bdt": 1000.0,
+    "txid": "Ags",
+    "status": "pending",
+    "timestamp": "2026-03-23T18:15:24.898917"
   }
 }
