@@ -20,12 +20,9 @@ FORCE_CHANNEL = os.environ.get("FORCE_CHANNEL", "")
 FORCE_GROUP = os.environ.get("FORCE_GROUP", "")
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("DB_NAME", "nextinvest")
-DEPOSIT_NUMBER = os.environ.get("DEPOSIT_NUMBER", "01309924182")
-
-# Rates
-DEPOSIT_RATE_USD_TO_BDT = 130   # 1 USD = 130 BDT
-WITHDRAW_RATE_USD_TO_BDT = 128  # 1 USD = 128 BDT (for display)
-WITHDRAW_SERVICE_CHARGE_BDT = 10
+DEFAULT_DEPOSIT_RATE = 130    # 1 USD = 130 BDT
+DEFAULT_WITHDRAW_RATE = 128   # 1 USD = 128 BDT
+SERVICE_CHARGE_BDT = 10
 
 if not BOT_TOKEN or not OWNER_ID or not FORCE_CHANNEL or not FORCE_GROUP or not MONGO_URI:
     raise ValueError("Missing required environment variables")
@@ -56,7 +53,14 @@ if not settings:
         "referral_bonus": 0.01,
         "deposit_enabled": True,
         "withdraw_enabled": True,
-        "maintenance_mode": False
+        "maintenance_mode": False,
+        "deposit_rate": DEFAULT_DEPOSIT_RATE,
+        "withdraw_rate": DEFAULT_WITHDRAW_RATE,
+        "deposit_numbers": {
+            "bkash": "01309924182",
+            "nagad": "01309924182",
+            "rocket": "01309924182"
+        }
     })
 
 # Default plans
@@ -179,13 +183,14 @@ def get_user_name(user_id):
     return name
 
 # ---------- Deposit ----------
-def create_deposit_request(user_id, amount_bdt, txid):
+def create_deposit_request(user_id, amount_bdt, txid, method):
     request_id = f"{user_id}_{int(time.time())}"
     deposit = {
         "request_id": request_id,
         "user_id": user_id,
         "amount_bdt": amount_bdt,
         "txid": txid,
+        "method": method,
         "status": "pending",
         "timestamp": datetime.utcnow()
     }
@@ -199,7 +204,8 @@ def approve_deposit(request_id):
     deposit = deposits_col.find_one({"request_id": request_id, "status": "pending"})
     if not deposit:
         return False, None
-    usd_amount = deposit["amount_bdt"] / DEPOSIT_RATE_USD_TO_BDT
+    rate = get_settings().get("deposit_rate", DEFAULT_DEPOSIT_RATE)
+    usd_amount = deposit["amount_bdt"] / rate
     users_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"balance": usd_amount}})
     add_transaction(deposit["user_id"], "deposit", usd_amount, "completed", f"Deposit of {deposit['amount_bdt']} BDT approved")
     deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "approved"}})
@@ -326,9 +332,11 @@ def welcome_message(first_name):
         f"   ✅ Fast Withdrawals\n\n"
         f"💡 <b>How to Start:</b>\n"
         f"   1️⃣ Click <b>💳 Deposit Money</b> below\n"
-        f"   2️⃣ Enter TXID and amount (BDT)\n"
-        f"   3️⃣ Admin approves → Balance added\n"
-        f"   4️⃣ Click <b>🚀 Invest Now</b> to grow your capital\n\n"
+        f"   2️⃣ Choose payment method (Bkash/Nagad/Rocket)\n"
+        f"   3️⃣ Send money to the provided number\n"
+        f"   4️⃣ Enter TXID and amount (BDT)\n"
+        f"   5️⃣ Admin approves → Balance added\n"
+        f"   6️⃣ Click <b>🚀 Invest Now</b> to grow your capital\n\n"
         f"🎁 <b>Welcome Bonus:</b> $0.05 instantly!\n\n"
         f"👇 <b>Use the buttons below to begin</b> 👇"
     )
@@ -432,14 +440,30 @@ def wallet_btn(m):
         text += f"   • {t['type']}: ${t['amount']} ({t['status']})\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
+# Deposit with method selection
 @bot.message_handler(func=lambda m: m.text == "💳 Deposit Money")
 def deposit_btn(m):
     settings = get_settings()
     if not settings.get("deposit_enabled", True):
         bot.send_message(m.chat.id, "❌ Deposit is currently disabled by admin.")
         return
-    info = f"💱 <b>Deposit Rate:</b> 1 USD = {DEPOSIT_RATE_USD_TO_BDT} BDT\n"
-    msg = bot.send_message(m.chat.id, info + f"📱 <b>Send Money / Cash In</b>\nNumber: <code>{DEPOSIT_NUMBER}</code>\n\nAfter sending, <b>enter the TXID</b>:", parse_mode="HTML")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Bkash", callback_data="deposit_method|bkash"))
+    markup.add(InlineKeyboardButton("Nagad", callback_data="deposit_method|nagad"))
+    markup.add(InlineKeyboardButton("Rocket", callback_data="deposit_method|rocket"))
+    bot.send_message(m.chat.id, "📱 <b>Select payment method:</b>", reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("deposit_method|"))
+def deposit_method_cb(call):
+    method = call.data.split("|")[1]
+    settings = get_settings()
+    numbers = settings.get("deposit_numbers", {})
+    number = numbers.get(method, "Not set")
+    # Store method in temp
+    if not hasattr(bot, 'temp_deposit'):
+        bot.temp_deposit = {}
+    bot.temp_deposit[call.from_user.id] = {"method": method}
+    msg = bot.send_message(call.message.chat.id, f"📱 <b>Send money to {method.capitalize()} number:</b>\n<code>{number}</code>\n\nAfter sending, <b>enter the TXID</b>:", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_txid)
 
 def process_deposit_txid(m):
@@ -447,10 +471,14 @@ def process_deposit_txid(m):
     if not txid:
         bot.send_message(m.chat.id, "❌ TXID cannot be empty. Please start deposit again.")
         return
+    user_id = m.from_user.id
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
-    bot.temp_deposit[m.from_user.id] = {"txid": txid}
-    bot.send_message(m.chat.id, "💸 <b>Enter the amount in BDT you sent:</b>\n(You'll receive USD = amount / 130)", parse_mode="HTML")
+    if user_id not in bot.temp_deposit:
+        bot.send_message(m.chat.id, "❌ Session expired. Please start deposit again.")
+        return
+    bot.temp_deposit[user_id]["txid"] = txid
+    bot.send_message(m.chat.id, "💸 <b>Enter the amount in BDT you sent:</b>\n(You'll receive USD based on current rate)", parse_mode="HTML")
     bot.register_next_step_handler(m, process_deposit_amount)
 
 def process_deposit_amount(m):
@@ -458,29 +486,36 @@ def process_deposit_amount(m):
         amount_bdt = float(m.text)
         if amount_bdt <= 0:
             raise ValueError
-        usd_amount = amount_bdt / DEPOSIT_RATE_USD_TO_BDT
-        confirm = f"✅ You sent <b>{amount_bdt} BDT</b> → will receive <b>${usd_amount:.2f} USD</b>.\n\nConfirm? (yes/no)"
+        user_id = m.from_user.id
+        if user_id not in bot.temp_deposit:
+            bot.send_message(m.chat.id, "❌ Session expired. Please start deposit again.")
+            return
+        rate = get_settings().get("deposit_rate", DEFAULT_DEPOSIT_RATE)
+        usd_amount = amount_bdt / rate
+        confirm = f"✅ You sent <b>{amount_bdt} BDT</b> via {bot.temp_deposit[user_id]['method'].capitalize()} → will receive <b>${usd_amount:.2f} USD</b> (1 USD = {rate} BDT).\n\nConfirm? (yes/no)"
         msg = bot.send_message(m.chat.id, confirm, parse_mode="HTML")
-        bot.temp_deposit[m.from_user.id]["amount_bdt"] = amount_bdt
-        bot.register_next_step_handler(msg, lambda m2: confirm_deposit(m2, m.from_user.id))
+        bot.temp_deposit[user_id]["amount_bdt"] = amount_bdt
+        bot.register_next_step_handler(msg, lambda m2: confirm_deposit(m2, user_id))
     except:
         bot.send_message(m.chat.id, "❌ Invalid amount. Please start deposit again.")
-        if hasattr(bot, 'temp_deposit') and m.from_user.id in bot.temp_deposit:
-            del bot.temp_deposit[m.from_user.id]
+        if user_id in bot.temp_deposit:
+            del bot.temp_deposit[user_id]
 
 def confirm_deposit(m, user_id):
     if m.text.lower() in ["yes", "y", "হ্যাঁ"]:
-        txid = bot.temp_deposit.get(user_id, {}).get("txid")
-        amount_bdt = bot.temp_deposit.get(user_id, {}).get("amount_bdt")
-        if not txid or not amount_bdt:
+        data = bot.temp_deposit.get(user_id, {})
+        method = data.get("method")
+        txid = data.get("txid")
+        amount_bdt = data.get("amount_bdt")
+        if not method or not txid or not amount_bdt:
             bot.send_message(m.chat.id, "❌ Missing data. Please start deposit again.")
             return
-        req_id = create_deposit_request(user_id, amount_bdt, txid)
-        bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>{amount_bdt} BDT</b>\n🔑 TXID: <code>{txid}</code>\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", parse_mode="HTML")
+        req_id = create_deposit_request(user_id, amount_bdt, txid, method)
+        bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>{amount_bdt} BDT</b>\n🔑 TXID: <code>{txid}</code>\n🆔 Method: {method.capitalize()}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", parse_mode="HTML")
         del bot.temp_deposit[user_id]
     else:
         bot.send_message(m.chat.id, "❌ Deposit cancelled.")
-        if hasattr(bot, 'temp_deposit') and user_id in bot.temp_deposit:
+        if user_id in bot.temp_deposit:
             del bot.temp_deposit[user_id]
 
 @bot.message_handler(func=lambda m: m.text == "💵 Withdraw Money")
@@ -489,7 +524,8 @@ def withdraw_btn(m):
     if not settings.get("withdraw_enabled", True):
         bot.send_message(m.chat.id, "❌ Withdrawal is currently disabled by admin.")
         return
-    info = f"💱 <b>Withdraw Rate:</b> 1 USD = {WITHDRAW_RATE_USD_TO_BDT} BDT\n💰 <b>Service Charge:</b> {WITHDRAW_SERVICE_CHARGE_BDT} BDT per withdrawal\n"
+    rate = settings.get("withdraw_rate", DEFAULT_WITHDRAW_RATE)
+    info = f"💱 <b>Withdraw Rate:</b> 1 USD = {rate} BDT\n💰 <b>Service Charge:</b> {SERVICE_CHARGE_BDT} BDT per withdrawal\n"
     msg = bot.send_message(m.chat.id, info + "💸 <b>Enter amount in USD (min $5):</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_withdraw_amount)
 
@@ -503,7 +539,8 @@ def process_withdraw_amount(m):
         if user["balance"] < amount:
             bot.send_message(m.chat.id, "❌ Insufficient balance.")
             return
-        estimated_bdt = amount * WITHDRAW_RATE_USD_TO_BDT - WITHDRAW_SERVICE_CHARGE_BDT
+        rate = get_settings().get("withdraw_rate", DEFAULT_WITHDRAW_RATE)
+        estimated_bdt = amount * rate - SERVICE_CHARGE_BDT
         if estimated_bdt < 0:
             estimated_bdt = 0
         confirm_text = f"💸 You will receive approximately <b>{estimated_bdt:.2f} BDT</b> after charge.\n\nProceed? (yes/no)"
@@ -612,7 +649,8 @@ def admin_menu():
         "🔓 Unban User", "📝 Update Plans",
         "👑 Add Admin", "🗑 Remove Admin",
         "💸 Referral Control", "⚙ System Settings",
-        "🔙 User Menu"
+        "💱 Set Deposit Rate", "💱 Set Withdraw Rate",
+        "📞 Set Deposit Numbers", "🔙 User Menu"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
@@ -664,13 +702,22 @@ def admin_deposits(m):
     if not pending:
         bot.send_message(m.chat.id, "📭 No pending deposits.")
         return
+    # Group by method
+    by_method = {}
     for dep in pending:
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
-                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
-        bot.send_message(m.chat.id,
-                         f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>{dep['amount_bdt']} BDT</b>\n🔑 TXID: <code>{dep['txid']}</code>",
-                         reply_markup=markup, parse_mode="HTML")
+        method = dep.get("method", "unknown")
+        if method not in by_method:
+            by_method[method] = []
+        by_method[method].append(dep)
+    for method, deps in by_method.items():
+        bot.send_message(m.chat.id, f"📥 <b>Deposits - {method.capitalize()}</b>", parse_mode="HTML")
+        for dep in deps:
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
+                       InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
+            bot.send_message(m.chat.id,
+                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>{dep['amount_bdt']} BDT</b>\n🔑 TXID: <code>{dep['txid']}</code>\n💳 Method: {dep.get('method', 'N/A')}",
+                             reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and is_admin(m.from_user.id))
 def admin_withdraws(m):
@@ -678,13 +725,22 @@ def admin_withdraws(m):
     if not pending:
         bot.send_message(m.chat.id, "📭 No pending withdrawals.")
         return
+    # Group by method
+    by_method = {}
     for wd in pending:
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
-                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
-        bot.send_message(m.chat.id,
-                         f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method']}\n📞 Account: <code>{wd['account']}</code>",
-                         reply_markup=markup, parse_mode="HTML")
+        method = wd.get("method", "unknown")
+        if method not in by_method:
+            by_method[method] = []
+        by_method[method].append(wd)
+    for method, wds in by_method.items():
+        bot.send_message(m.chat.id, f"📤 <b>Withdrawals - {method.capitalize()}</b>", parse_mode="HTML")
+        for wd in wds:
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
+                       InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
+            bot.send_message(m.chat.id,
+                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method']}\n📞 Account: <code>{wd['account']}</code>",
+                             reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats" and is_admin(m.from_user.id))
 def admin_stats(m):
@@ -874,6 +930,67 @@ def sys_toggle_cb(call):
     bot.answer_callback_query(call.id, msg)
     bot.edit_message_text("✅ Settings updated. Use /admin again to see changes.", call.message.chat.id, call.message.message_id)
 
+@bot.message_handler(func=lambda m: m.text == "💱 Set Deposit Rate" and is_admin(m.from_user.id))
+def admin_set_deposit_rate(m):
+    current = get_settings().get("deposit_rate", DEFAULT_DEPOSIT_RATE)
+    msg = bot.send_message(m.chat.id, f"💱 <b>Set Deposit Rate</b>\n\nCurrent: 1 USD = {current} BDT\n\nEnter new rate (e.g., 130):", parse_mode="HTML")
+    bot.register_next_step_handler(msg, set_deposit_rate)
+
+def set_deposit_rate(m):
+    try:
+        new_rate = int(m.text)
+        if new_rate <= 0:
+            raise ValueError
+        update_settings({"deposit_rate": new_rate})
+        bot.send_message(m.chat.id, f"✅ Deposit rate updated: 1 USD = {new_rate} BDT", parse_mode="HTML")
+    except:
+        bot.send_message(m.chat.id, "❌ Invalid rate. Please enter a positive integer.")
+
+@bot.message_handler(func=lambda m: m.text == "💱 Set Withdraw Rate" and is_admin(m.from_user.id))
+def admin_set_withdraw_rate(m):
+    current = get_settings().get("withdraw_rate", DEFAULT_WITHDRAW_RATE)
+    msg = bot.send_message(m.chat.id, f"💱 <b>Set Withdraw Rate</b>\n\nCurrent: 1 USD = {current} BDT\n\nEnter new rate (e.g., 128):", parse_mode="HTML")
+    bot.register_next_step_handler(msg, set_withdraw_rate)
+
+def set_withdraw_rate(m):
+    try:
+        new_rate = int(m.text)
+        if new_rate <= 0:
+            raise ValueError
+        update_settings({"withdraw_rate": new_rate})
+        bot.send_message(m.chat.id, f"✅ Withdraw rate updated: 1 USD = {new_rate} BDT", parse_mode="HTML")
+    except:
+        bot.send_message(m.chat.id, "❌ Invalid rate. Please enter a positive integer.")
+
+@bot.message_handler(func=lambda m: m.text == "📞 Set Deposit Numbers" and is_admin(m.from_user.id))
+def admin_set_deposit_numbers(m):
+    current = get_settings().get("deposit_numbers", {})
+    text = "📞 <b>Set Deposit Numbers</b>\n\n"
+    text += f"Bkash: {current.get('bkash', 'Not set')}\n"
+    text += f"Nagad: {current.get('nagad', 'Not set')}\n"
+    text += f"Rocket: {current.get('rocket', 'Not set')}\n\n"
+    text += "Send new numbers in format:\n<code>method:number</code>\n\nExample: <code>bkash:01309924182</code>"
+    bot.send_message(m.chat.id, text, parse_mode="HTML")
+    bot.register_next_step_handler(m, process_deposit_numbers)
+
+def process_deposit_numbers(m):
+    try:
+        parts = m.text.split(":")
+        if len(parts) != 2:
+            raise ValueError
+        method = parts[0].lower()
+        number = parts[1].strip()
+        if method not in ["bkash", "nagad", "rocket"]:
+            bot.send_message(m.chat.id, "❌ Invalid method. Use bkash, nagad, or rocket.")
+            return
+        settings = get_settings()
+        numbers = settings.get("deposit_numbers", {})
+        numbers[method] = number
+        update_settings({"deposit_numbers": numbers})
+        bot.send_message(m.chat.id, f"✅ {method.capitalize()} number updated to <code>{number}</code>", parse_mode="HTML")
+    except:
+        bot.send_message(m.chat.id, "❌ Invalid format. Use: method:number")
+
 # ------------------- Admin Approval Callbacks (with reason) -------------------
 def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, account=None):
     user_name = get_user_name(user_id)
@@ -881,22 +998,22 @@ def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, met
         if action == "approve":
             emoji = "✅"
             title = "Deposit Approved"
-            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>"
+            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.capitalize()}"
         else:  # reject
             emoji = "❌"
             title = "Deposit Rejected"
-            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>"
+            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.capitalize()}"
             if reason:
                 details += f"\n💬 <b>Reason:</b> {reason}"
     else:  # withdraw
         if action == "approve":
             emoji = "✅"
             title = "Withdrawal Approved"
-            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method}\n📞 Account: <code>{account}</code>"
+            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.capitalize()}\n📞 Account: <code>{account}</code>"
         else:  # reject
             emoji = "❌"
             title = "Withdrawal Rejected"
-            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method}\n📞 Account: <code>{account}</code>"
+            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.capitalize()}\n📞 Account: <code>{account}</code>"
             if reason:
                 details += f"\n💬 <b>Reason:</b> {reason}"
     return (
@@ -906,7 +1023,101 @@ def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, met
         f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
     )
 
-# Deposit approve (no reason needed)
+def ask_reason(call, request_id, type_):
+    markup = InlineKeyboardMarkup()
+    reasons = [
+        "TXID not found",
+        "Amount mismatch",
+        "Screenshot missing",
+        "Duplicate TXID",
+        "Other"
+    ]
+    for r in reasons:
+        markup.add(InlineKeyboardButton(r, callback_data=f"reject_reason_{type_}|{request_id}|{r}"))
+    markup.add(InlineKeyboardButton("✏️ Custom reason", callback_data=f"reject_reason_{type_}|{request_id}|custom"))
+    bot.send_message(call.message.chat.id, "💬 <b>Select reason for rejection:</b>", reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reject_reason_"))
+def reject_reason_cb(call):
+    parts = call.data.split("|")
+    type_ = parts[0].split("_")[2]  # deposit or withdraw
+    request_id = parts[1]
+    reason = parts[2]
+    if reason == "custom":
+        msg = bot.send_message(call.message.chat.id, "💬 Please enter the custom reason:")
+        bot.register_next_step_handler(msg, lambda m: process_reject(m, request_id, type_, call.message.chat.id, call.message.message_id))
+    else:
+        # Process rejection immediately
+        process_reject_with_reason(call, request_id, type_, reason)
+
+def process_reject_with_reason(call, request_id, type_, reason):
+    if type_ == "deposit":
+        success, dep = reject_deposit(request_id, reason)
+        if success:
+            bot.answer_callback_query(call.id, "❌ Deposit rejected.")
+            bot.edit_message_text("❌ Deposit rejected.", call.message.chat.id, call.message.message_id)
+            bot.send_message(dep["user_id"], f"❌ Your deposit request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
+            msg_text = format_auto_post("reject", "deposit", dep["user_id"], dep["amount_bdt"], reason=reason, txid=dep["txid"], method=dep["method"])
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+                bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Auto-post error: {e}")
+            bot.send_message(call.message.chat.id, f"✅ Deposit request {request_id} rejected with reason: {reason}")
+        else:
+            bot.answer_callback_query(call.id, "❌ Failed or already processed.")
+    else:  # withdraw
+        success, wd = reject_withdraw(request_id, reason)
+        if success:
+            bot.answer_callback_query(call.id, "❌ Withdraw rejected.")
+            bot.edit_message_text("❌ Withdraw rejected.", call.message.chat.id, call.message.message_id)
+            bot.send_message(wd["user_id"], f"❌ Your withdrawal request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
+            msg_text = format_auto_post("reject", "withdraw", wd["user_id"], wd["amount_usd"], reason=reason, method=wd["method"], account=wd["account"])
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+                bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Auto-post error: {e}")
+            bot.send_message(call.message.chat.id, f"✅ Withdrawal request {request_id} rejected with reason: {reason}")
+        else:
+            bot.answer_callback_query(call.id, "❌ Failed or already processed.")
+
+def process_reject(m, request_id, type_, chat_id, message_id):
+    reason = m.text.strip()
+    if not reason:
+        reason = "No reason provided"
+    if type_ == "deposit":
+        success, dep = reject_deposit(request_id, reason)
+        if success:
+            bot.answer_callback_query(m.message_id, "❌ Deposit rejected.")
+            bot.edit_message_text("❌ Deposit rejected.", chat_id, message_id)
+            bot.send_message(dep["user_id"], f"❌ Your deposit request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
+            msg_text = format_auto_post("reject", "deposit", dep["user_id"], dep["amount_bdt"], reason=reason, txid=dep["txid"], method=dep["method"])
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+                bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Auto-post error: {e}")
+            bot.send_message(chat_id, f"✅ Deposit request {request_id} rejected with reason: {reason}")
+        else:
+            bot.send_message(chat_id, "❌ Failed or already processed.")
+    else:
+        success, wd = reject_withdraw(request_id, reason)
+        if success:
+            bot.answer_callback_query(m.message_id, "❌ Withdraw rejected.")
+            bot.edit_message_text("❌ Withdraw rejected.", chat_id, message_id)
+            bot.send_message(wd["user_id"], f"❌ Your withdrawal request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
+            msg_text = format_auto_post("reject", "withdraw", wd["user_id"], wd["amount_usd"], reason=reason, method=wd["method"], account=wd["account"])
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
+                bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Auto-post error: {e}")
+            bot.send_message(chat_id, f"✅ Withdrawal request {request_id} rejected with reason: {reason}")
+        else:
+            bot.send_message(chat_id, "❌ Failed or already processed.")
+
+# Approve handlers (no reason needed)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_dep|"))
 def approve_dep_cb(call):
     if not is_admin(call.from_user.id):
@@ -918,7 +1129,7 @@ def approve_dep_cb(call):
         bot.answer_callback_query(call.id, "✅ Deposit approved!")
         bot.edit_message_text("✅ Deposit approved.", call.message.chat.id, call.message.message_id)
         bot.send_message(dep["user_id"], "✅ Your deposit has been approved! Balance updated.")
-        msg_text = format_auto_post("approve", "deposit", dep["user_id"], dep["amount_bdt"], txid=dep["txid"])
+        msg_text = format_auto_post("approve", "deposit", dep["user_id"], dep["amount_bdt"], txid=dep["txid"], method=dep.get("method", "unknown"))
         try:
             bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
             bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
@@ -927,37 +1138,14 @@ def approve_dep_cb(call):
     else:
         bot.answer_callback_query(call.id, "❌ Failed or already processed.")
 
-# Deposit reject (ask for reason)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_dep|"))
 def reject_dep_cb(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    # Ask for reason
-    msg = bot.send_message(call.message.chat.id, "💬 Please enter the reason for rejecting this deposit:")
-    bot.register_next_step_handler(msg, lambda m: process_deposit_reject(m, req_id, call.message.chat.id, call.message.message_id))
+    ask_reason(call, req_id, "deposit")
 
-def process_deposit_reject(m, req_id, chat_id, message_id):
-    reason = m.text.strip()
-    if not reason:
-        reason = "No reason provided"
-    success, dep = reject_deposit(req_id, reason)
-    if success:
-        bot.answer_callback_query(m.message_id, "❌ Deposit rejected.")
-        bot.edit_message_text("❌ Deposit rejected.", chat_id, message_id)
-        bot.send_message(dep["user_id"], f"❌ Your deposit request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
-        msg_text = format_auto_post("reject", "deposit", dep["user_id"], dep["amount_bdt"], reason=reason, txid=dep["txid"])
-        try:
-            bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
-            bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Auto-post error: {e}")
-        bot.send_message(chat_id, f"✅ Deposit request {req_id} has been rejected with reason: {reason}")
-    else:
-        bot.send_message(chat_id, "❌ Failed or already processed.")
-
-# Withdraw approve (no reason needed)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_wd|"))
 def approve_wd_cb(call):
     if not is_admin(call.from_user.id):
@@ -978,34 +1166,13 @@ def approve_wd_cb(call):
     else:
         bot.answer_callback_query(call.id, "❌ Failed or already processed.")
 
-# Withdraw reject (ask for reason)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_wd|"))
 def reject_wd_cb(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    msg = bot.send_message(call.message.chat.id, "💬 Please enter the reason for rejecting this withdrawal:")
-    bot.register_next_step_handler(msg, lambda m: process_withdraw_reject(m, req_id, call.message.chat.id, call.message.message_id))
-
-def process_withdraw_reject(m, req_id, chat_id, message_id):
-    reason = m.text.strip()
-    if not reason:
-        reason = "No reason provided"
-    success, wd = reject_withdraw(req_id, reason)
-    if success:
-        bot.answer_callback_query(m.message_id, "❌ Withdraw rejected.")
-        bot.edit_message_text("❌ Withdraw rejected.", chat_id, message_id)
-        bot.send_message(wd["user_id"], f"❌ Your withdrawal request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
-        msg_text = format_auto_post("reject", "withdraw", wd["user_id"], wd["amount_usd"], reason=reason, method=wd["method"], account=wd["account"])
-        try:
-            bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
-            bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Auto-post error: {e}")
-        bot.send_message(chat_id, f"✅ Withdrawal request {req_id} has been rejected with reason: {reason}")
-    else:
-        bot.send_message(chat_id, "❌ Failed or already processed.")
+    ask_reason(call, req_id, "withdraw")
 
 # ======================= FLASK HEALTH CHECK =======================
 flask_app = Flask(__name__)
