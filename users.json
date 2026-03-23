@@ -4,9 +4,11 @@
     "username": "DarkPrince_Dev",
     "first_name": "\u1d05\u1d00\u0280\u1d0b \u1d18\u0280\u026a\u0274\u1d04\u1d07",
     "joined": "2026-03-23T17:18:23.192993",
-    "balance": 0.060000000000000005,
+    "balance": 0.05,
     "referred_by": null,
-    "referrals": [],
+    "referrals": [
+      7650251578
+    ],
     "transactions": [
       {
         "type": "signup_bonus",
@@ -14,13 +16,6 @@
         "status": "completed",
         "details": "",
         "timestamp": "2026-03-23T17:18:34.006395"
-      },
-      {
-        "type": "referral_bonus",
-        "amount": 0.01,
-        "status": "completed",
-        "details": "New user 7650251578",
-        "timestamp": "2026-03-23T17:20:11.508727"
       }
     ],
     "banned": false
@@ -31,7 +26,7 @@
     "first_name": "\ud835\uddde\ud835\uddf6\ud835\uddfb\ud835\uddf4\ud835\uddd6\ud835\uddfc\ud835\uddef\ud835\uddff\ud835\uddee \ud80c\udd98",
     "joined": "2026-03-23T17:20:03.929650",
     "balance": 0.05,
-    "referred_by": null,
+    "referred_by": 6919025708,
     "referrals": [],
     "transactions": [
       {
