@@ -17,5 +17,16 @@
       }
     ],
     "banned": false
+  },
+  "7650251578": {
+    "id": 7650251578,
+    "username": "King_Kobra_12",
+    "first_name": "\ud835\uddde\ud835\uddf6\ud835\uddfb\ud835\uddf4\ud835\uddd6\ud835\uddfc\ud835\uddef\ud835\uddff\ud835\uddee \ud80c\udd98",
+    "joined": "2026-03-23T17:20:03.929650",
+    "balance": 0.05,
+    "referred_by": null,
+    "referrals": [],
+    "transactions": [],
+    "banned": false
   }
 }
