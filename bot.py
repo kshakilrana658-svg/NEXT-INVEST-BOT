@@ -8,7 +8,7 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from flask import Flask
 
-# ======================= CONFIGURATION (from environment) =======================
+# ======================= CONFIGURATION =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 FORCE_CHANNEL = os.environ.get("FORCE_CHANNEL", "")
@@ -55,11 +55,6 @@ def github_write(file_name, data):
     return put_resp.status_code in [200, 201]
 
 # ======================= DATA LAYER =======================
-# users.json: { user_id: { "id": int, "username": str, "first_name": str, "joined": str, "balance": float, "referred_by": int|null, "referrals": [user_id], "transactions": [], "banned": bool } }
-# deposit.json: { request_id: { "user_id": int, "amount_bdt": float, "txid": str, "screenshot_file_id": str, "status": "pending/approved/rejected", "timestamp": str } }
-# withdraw.json: { request_id: { "user_id": int, "amount_usd": float, "method": str, "account": str, "status": "pending/approved/rejected", "timestamp": str } }
-# invest.json: { "plans": { plan_id: { "name": str, "profit_percent": float, "duration_days": int, "min_amount": float } }, "investments": { user_id: [ { "plan_id": str, "amount": float, "start_date": str, "end_date": str, "status": "active/completed", "profit_added": bool } ] } }
-
 def get_user(user_id):
     users = github_read("users.json")
     return users.get(str(user_id))
@@ -103,17 +98,14 @@ def add_referral(new_user_id, ref_by):
     if ref_by == new_user_id:
         return False
     users = github_read("users.json")
-    # Add referral to ref_by's list
     ref_user = users.get(str(ref_by), {})
     referrals = ref_user.get("referrals", [])
     if new_user_id not in referrals:
         referrals.append(new_user_id)
         ref_user["referrals"] = referrals
         users[str(ref_by)] = ref_user
-        # Give bonus
         update_balance(ref_by, 0.01, "add")
         add_transaction(ref_by, "referral_bonus", 0.01, "completed", f"New user {new_user_id}")
-    # Set referred_by for new user
     new_user = users.get(str(new_user_id), {})
     new_user["referred_by"] = ref_by
     users[str(new_user_id)] = new_user
@@ -190,7 +182,6 @@ def approve_withdraw(req_id):
     withdraws = github_read("withdraw.json")
     if req_id in withdraws and withdraws[req_id]["status"] == "pending":
         req = withdraws[req_id]
-        # Deduct balance
         new_bal = update_balance(req["user_id"], req["amount_usd"], "subtract")
         if new_bal < 0:
             update_balance(req["user_id"], req["amount_usd"], "add")  # revert
@@ -236,9 +227,7 @@ def add_investment(user_id, plan_id, amount):
     user_balance = get_user_balance(user_id)
     if user_balance < amount:
         return False
-    # Deduct balance
     update_balance(user_id, amount, "subtract")
-    # Record investment
     data = github_read("invest.json")
     if "investments" not in data:
         data["investments"] = {}
@@ -320,7 +309,6 @@ def start_cmd(message):
 
     user = get_user(user_id)
     if not user:
-        # New user
         ref_param = message.text.split()
         ref_by = None
         if len(ref_param) > 1 and ref_param[1].isdigit():
@@ -330,7 +318,7 @@ def start_cmd(message):
             "username": message.from_user.username,
             "first_name": message.from_user.first_name,
             "joined": datetime.now().isoformat(),
-            "balance": 0.05,  # Signup bonus
+            "balance": 0.05,
             "referred_by": None,
             "referrals": [],
             "transactions": [],
@@ -399,7 +387,7 @@ def process_invest(m):
 def wallet_btn(m):
     bal = get_user_balance(m.from_user.id)
     user = get_user(m.from_user.id)
-    transactions = user.get("transactions", [])[-5:]  # last 5
+    transactions = user.get("transactions", [])[-5:]
     text = f"💰 Balance: ${bal:.2f}\n\n📜 Last 5 Transactions:\n"
     for t in transactions[::-1]:
         text += f"{t['type']}: ${t['amount']} ({t['status']})\n"
@@ -513,7 +501,9 @@ def referral_btn(m):
     user = get_user(m.from_user.id)
     referrals = user.get("referrals", [])
     text = f"🔗 Your referral link:\n{ref_link}\n\n👥 Total referrals: {len(referrals)}\n💰 Earn $0.01 per referral!"
-    bot.send_message(m.chat.id, text)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📤 Share Link", switch_inline_query=ref_link))
+    bot.send_message(m.chat.id, text, reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "👤 Profile")
 def profile_btn(m):
@@ -526,100 +516,37 @@ def profile_btn(m):
 def support_btn(m):
     bot.send_message(m.chat.id, "📩 For support contact: @dark_princes12")
 
-# ======================= ADMIN PANEL =======================
+# ======================= ADMIN PANEL (KEYBOARD) =======================
+def admin_menu():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        "👥 Users", "💰 Balance",
+        "📥 Deposit", "📤 Withdraw",
+        "📊 Stats", "📢 Broadcast",
+        "📦 Plans", "🛑 Ban"
+    ]
+    markup.add(*[KeyboardButton(b) for b in buttons])
+    return markup
+
 @bot.message_handler(commands=['admin'])
-def admin_panel(m):
-    if m.from_user.id != OWNER_ID:
-        bot.send_message(m.chat.id, "⛔ Unauthorized.")
+def admin_panel(message):
+    if message.from_user.id != OWNER_ID:
+        bot.send_message(message.chat.id, "⛔ Unauthorized.")
         return
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-        InlineKeyboardButton("💰 Balance", callback_data="admin_balance"),
-        InlineKeyboardButton("📥 Deposit", callback_data="admin_deposits"),
-        InlineKeyboardButton("📤 Withdraw", callback_data="admin_withdraws"),
-        InlineKeyboardButton("📊 Stats", callback_data="admin_stats"),
-        InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
-        InlineKeyboardButton("📦 Plans", callback_data="admin_plans"),
-        InlineKeyboardButton("🛑 Ban", callback_data="admin_ban")
-    )
-    bot.send_message(m.chat.id, "🔧 Admin Panel:", reply_markup=markup)
+    bot.send_message(message.chat.id, "🔧 Admin Panel:", reply_markup=admin_menu())
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
-def admin_cb(call):
-    if call.from_user.id != OWNER_ID:
-        bot.answer_callback_query(call.id, "Not admin")
-        return
-    data = call.data.split("_")[1]
+@bot.message_handler(func=lambda m: m.text == "👥 Users" and m.from_user.id == OWNER_ID)
+def admin_users(m):
+    users = github_read("users.json")
+    text = f"Total Users: {len(users)}\n"
+    for uid, u in list(users.items())[:10]:
+        text += f"{uid} - {u.get('first_name')} (${u.get('balance',0)})\n"
+    bot.send_message(m.chat.id, text)
 
-    if data == "users":
-        users = github_read("users.json")
-        text = f"Total Users: {len(users)}\n"
-        for uid, u in list(users.items())[:10]:
-            text += f"{uid} - {u.get('first_name')} (${u.get('balance',0)})\n"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
-
-    elif data == "balance":
-        msg = bot.send_message(call.message.chat.id, "Send: user_id amount (e.g., 123456 10)")
-        bot.register_next_step_handler(msg, add_balance_admin)
-        bot.edit_message_text("Add balance mode.", call.message.chat.id, call.message.message_id)
-
-    elif data == "deposits":
-        pending = get_pending_deposits()
-        if not pending:
-            bot.edit_message_text("No pending deposits.", call.message.chat.id, call.message.message_id)
-            return
-        for req_id, req in pending.items():
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("📸 Screenshot", callback_data=f"view_dep_screenshot_{req_id}"))
-            markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"approve_dep_{req_id}"),
-                       InlineKeyboardButton("❌ Reject", callback_data=f"reject_dep_{req_id}"))
-            bot.send_message(call.message.chat.id,
-                             f"Deposit Request:\nUser: {req['user_id']}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}\nStatus: {req['status']}",
-                             reply_markup=markup)
-        bot.edit_message_text("Pending deposits listed above.", call.message.chat.id, call.message.message_id)
-
-    elif data == "withdraws":
-        pending = get_pending_withdraws()
-        if not pending:
-            bot.edit_message_text("No pending withdrawals.", call.message.chat.id, call.message.message_id)
-            return
-        for req_id, req in pending.items():
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"approve_wd_{req_id}"),
-                       InlineKeyboardButton("❌ Reject", callback_data=f"reject_wd_{req_id}"))
-            bot.send_message(call.message.chat.id,
-                             f"Withdraw Request:\nUser: {req['user_id']}\nAmount: ${req['amount_usd']}\nMethod: {req['method']}\nAccount: {req['account']}",
-                             reply_markup=markup)
-        bot.edit_message_text("Pending withdrawals listed above.", call.message.chat.id, call.message.message_id)
-
-    elif data == "stats":
-        users = github_read("users.json")
-        total_balance = sum(u.get("balance", 0) for u in users.values())
-        inv_data = github_read("invest.json")
-        total_invested = 0
-        for invs in inv_data.get("investments", {}).values():
-            total_invested += sum(i["amount"] for i in invs)
-        text = f"📊 Stats:\n👥 Users: {len(users)}\n💰 Total Balance: ${total_balance:.2f}\n💸 Total Invested: ${total_invested:.2f}"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
-
-    elif data == "broadcast":
-        msg = bot.send_message(call.message.chat.id, "Send broadcast message:")
-        bot.register_next_step_handler(msg, broadcast_msg)
-        bot.edit_message_text("Broadcast mode.", call.message.chat.id, call.message.message_id)
-
-    elif data == "plans":
-        plans = get_plans()
-        text = "Current Plans:\n"
-        for pid, p in plans.items():
-            text += f"{pid}: {p['name']} - {p['profit_percent']}%, {p['duration_days']} days, min ${p['min_amount']}\n"
-        text += "\nTo edit, use /admin_plans (not implemented in this demo)."
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
-
-    elif data == "ban":
-        msg = bot.send_message(call.message.chat.id, "Enter user ID to ban:")
-        bot.register_next_step_handler(msg, ban_user)
-        bot.edit_message_text("Ban mode.", call.message.chat.id, call.message.message_id)
+@bot.message_handler(func=lambda m: m.text == "💰 Balance" and m.from_user.id == OWNER_ID)
+def admin_balance(m):
+    msg = bot.send_message(m.chat.id, "Send: user_id amount (e.g., 123456 10)")
+    bot.register_next_step_handler(msg, add_balance_admin)
 
 def add_balance_admin(m):
     try:
@@ -632,6 +559,51 @@ def add_balance_admin(m):
     except:
         bot.send_message(m.chat.id, "Invalid format. Use: user_id amount")
 
+@bot.message_handler(func=lambda m: m.text == "📥 Deposit" and m.from_user.id == OWNER_ID)
+def admin_deposits(m):
+    pending = get_pending_deposits()
+    if not pending:
+        bot.send_message(m.chat.id, "No pending deposits.")
+        return
+    for req_id, req in pending.items():
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📸 Screenshot", callback_data=f"view_dep_screenshot_{req_id}"))
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"approve_dep_{req_id}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"reject_dep_{req_id}"))
+        bot.send_message(m.chat.id,
+                         f"Deposit Request:\nUser: {req['user_id']}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}\nStatus: {req['status']}",
+                         reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and m.from_user.id == OWNER_ID)
+def admin_withdraws(m):
+    pending = get_pending_withdraws()
+    if not pending:
+        bot.send_message(m.chat.id, "No pending withdrawals.")
+        return
+    for req_id, req in pending.items():
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"approve_wd_{req_id}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"reject_wd_{req_id}"))
+        bot.send_message(m.chat.id,
+                         f"Withdraw Request:\nUser: {req['user_id']}\nAmount: ${req['amount_usd']}\nMethod: {req['method']}\nAccount: {req['account']}",
+                         reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "📊 Stats" and m.from_user.id == OWNER_ID)
+def admin_stats(m):
+    users = github_read("users.json")
+    total_balance = sum(u.get("balance", 0) for u in users.values())
+    inv_data = github_read("invest.json")
+    total_invested = 0
+    for invs in inv_data.get("investments", {}).values():
+        total_invested += sum(i["amount"] for i in invs)
+    text = f"📊 Stats:\n👥 Users: {len(users)}\n💰 Total Balance: ${total_balance:.2f}\n💸 Total Invested: ${total_invested:.2f}"
+    bot.send_message(m.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "📢 Broadcast" and m.from_user.id == OWNER_ID)
+def admin_broadcast(m):
+    msg = bot.send_message(m.chat.id, "Send broadcast message:")
+    bot.register_next_step_handler(msg, broadcast_msg)
+
 def broadcast_msg(m):
     text = m.text
     users = github_read("users.json")
@@ -643,6 +615,20 @@ def broadcast_msg(m):
         except:
             pass
     bot.send_message(m.chat.id, f"Broadcast sent to {count} users.")
+
+@bot.message_handler(func=lambda m: m.text == "📦 Plans" and m.from_user.id == OWNER_ID)
+def admin_plans(m):
+    plans = get_plans()
+    text = "Current Plans:\n"
+    for pid, p in plans.items():
+        text += f"{pid}: {p['name']} - {p['profit_percent']}%, {p['duration_days']} days, min ${p['min_amount']}\n"
+    text += "\nTo edit, use /admin_plans (not implemented in this demo)."
+    bot.send_message(m.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "🛑 Ban" and m.from_user.id == OWNER_ID)
+def admin_ban(m):
+    msg = bot.send_message(m.chat.id, "Enter user ID to ban:")
+    bot.register_next_step_handler(msg, ban_user)
 
 def ban_user(m):
     try:
@@ -677,9 +663,19 @@ def approve_dep_cb(call):
         dep = github_read("deposit.json").get(req_id, {})
         user_id = dep.get("user_id")
         if user_id:
+            # Notify user
             bot.send_message(user_id, "✅ Your deposit has been approved! Balance updated.")
+            # Auto-post to channel and group
+            msg_text = f"📢 Deposit approved!\nUser: {user_id}\nAmount: {dep['amount_bdt']} BDT\nTXID: {dep['txid']}"
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text)
+                bot.send_message(FORCE_GROUP, msg_text)
+            except:
+                pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
+    # Remove request from display by refreshing (the original message remains but is marked processed)
+    # The request is now status approved, so it won't appear in pending next time.
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reject_dep_"))
 def reject_dep_cb(call):
@@ -691,6 +687,12 @@ def reject_dep_cb(call):
         user_id = dep.get("user_id")
         if user_id:
             bot.send_message(user_id, "❌ Your deposit request was rejected.")
+            msg_text = f"❌ Deposit rejected!\nUser: {user_id}\nAmount: {dep['amount_bdt']} BDT\nTXID: {dep['txid']}"
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text)
+                bot.send_message(FORCE_GROUP, msg_text)
+            except:
+                pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
@@ -700,17 +702,17 @@ def approve_wd_cb(call):
     if approve_withdraw(req_id):
         bot.answer_callback_query(call.id, "Withdraw approved.")
         bot.edit_message_text("Withdraw approved.", call.message.chat.id, call.message.message_id)
-        withdraw = github_read("withdraw.json").get(req_id, {})
-        user_id = withdraw.get("user_id")
-        amount = withdraw.get("amount_usd")
+        wd = github_read("withdraw.json").get(req_id, {})
+        user_id = wd.get("user_id")
+        amount = wd.get("amount_usd")
         if user_id and amount:
-            msg_text = f"📢 New withdrawal approved!\nUser ID: {user_id}\nAmount: ${amount}"
+            bot.send_message(user_id, f"✅ Your withdrawal of ${amount} has been approved and sent.")
+            msg_text = f"📢 Withdrawal approved!\nUser: {user_id}\nAmount: ${amount}\nMethod: {wd['method']}\nAccount: {wd['account']}"
             try:
                 bot.send_message(FORCE_CHANNEL, msg_text)
                 bot.send_message(FORCE_GROUP, msg_text)
             except:
                 pass
-            bot.send_message(user_id, f"✅ Your withdrawal of ${amount} has been approved and sent.")
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
@@ -724,6 +726,12 @@ def reject_wd_cb(call):
         user_id = wd.get("user_id")
         if user_id:
             bot.send_message(user_id, "❌ Your withdrawal request was rejected.")
+            msg_text = f"❌ Withdrawal rejected!\nUser: {user_id}\nAmount: ${wd['amount_usd']}\nMethod: {wd['method']}"
+            try:
+                bot.send_message(FORCE_CHANNEL, msg_text)
+                bot.send_message(FORCE_GROUP, msg_text)
+            except:
+                pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
