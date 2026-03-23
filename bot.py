@@ -8,13 +8,12 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from flask import Flask
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
-from bson.objectid import ObjectId
 
 # ======================= LOGGING =======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ======================= CONFIGURATION (Environment) =======================
+# ======================= CONFIGURATION =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 FORCE_CHANNEL = os.environ.get("FORCE_CHANNEL", "")
@@ -25,7 +24,7 @@ DEPOSIT_NUMBER = os.environ.get("DEPOSIT_NUMBER", "01309924182")
 
 # Rates
 DEPOSIT_RATE_USD_TO_BDT = 130   # 1 USD = 130 BDT
-WITHDRAW_RATE_USD_TO_BDT = 110  # 1 USD = 110 BDT (for display)
+WITHDRAW_RATE_USD_TO_BDT = 128  # 1 USD = 128 BDT (for display)
 WITHDRAW_SERVICE_CHARGE_BDT = 10
 
 if not BOT_TOKEN or not OWNER_ID or not FORCE_CHANNEL or not FORCE_GROUP or not MONGO_URI:
@@ -34,10 +33,9 @@ if not BOT_TOKEN or not OWNER_ID or not FORCE_CHANNEL or not FORCE_GROUP or not 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 # ======================= MONGODB SETUP =======================
-client = MongoClient(MONGO_URI)
+client = MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=False)
 db = client[DB_NAME]
 
-# Collections
 users_col = db["users"]
 deposits_col = db["deposits"]
 withdraws_col = db["withdraws"]
@@ -45,12 +43,12 @@ investments_col = db["investments"]
 admins_col = db["admins"]
 settings_col = db["settings"]
 
-# Ensure indexes
+# Indexes
 users_col.create_index("user_id", unique=True)
 deposits_col.create_index("request_id", unique=True)
 withdraws_col.create_index("request_id", unique=True)
 
-# Default settings if not present
+# Default settings
 settings = settings_col.find_one({"_id": "global"})
 if not settings:
     settings_col.insert_one({
@@ -61,7 +59,7 @@ if not settings:
         "maintenance_mode": False
     })
 
-# Default plans if not present
+# Default plans
 if investments_col.count_documents({"_id": "plans"}) == 0:
     investments_col.insert_one({
         "_id": "plans",
@@ -83,6 +81,9 @@ def get_plans():
     doc = investments_col.find_one({"_id": "plans"})
     return doc["plans"] if doc else {}
 
+def update_plans(new_plans):
+    investments_col.update_one({"_id": "plans"}, {"$set": {"plans": new_plans}})
+
 def get_user(user_id):
     return users_col.find_one({"user_id": user_id})
 
@@ -92,7 +93,7 @@ def create_user(user_id, username, first_name, ref_by=None):
         "username": username,
         "first_name": first_name,
         "joined": datetime.utcnow(),
-        "balance": 0.05,  # signup bonus
+        "balance": 0.05,
         "referred_by": ref_by,
         "referrals": [],
         "transactions": [],
@@ -100,12 +101,10 @@ def create_user(user_id, username, first_name, ref_by=None):
     }
     try:
         users_col.insert_one(user_data)
-        # Add referral if applicable
         if ref_by and ref_by != user_id:
             ref_user = users_col.find_one({"user_id": ref_by})
             if ref_user:
                 bonus = get_settings()["referral_bonus"]
-                # Add bonus to referrer
                 users_col.update_one(
                     {"user_id": ref_by},
                     {"$inc": {"balance": bonus},
@@ -123,22 +122,23 @@ def create_user(user_id, username, first_name, ref_by=None):
         return None
 
 def update_balance(user_id, amount, operation="add"):
-    """operation: 'add' or 'subtract'"""
     user = users_col.find_one({"user_id": user_id})
     if not user:
         return False
     current = user.get("balance", 0.0)
     new_balance = current + amount if operation == "add" else current - amount
     users_col.update_one({"user_id": user_id}, {"$set": {"balance": new_balance}})
-    # Add transaction record
-    txn = {
-        "type": "admin_add" if operation == "add" else "admin_remove",
-        "amount": amount,
-        "status": "completed",
-        "details": f"Balance {'added' if operation == 'add' else 'removed'} by admin",
-        "timestamp": datetime.utcnow()
-    }
-    users_col.update_one({"user_id": user_id}, {"$push": {"transactions": txn}})
+    txn_type = "admin_add" if operation == "add" else "admin_remove"
+    users_col.update_one(
+        {"user_id": user_id},
+        {"$push": {"transactions": {
+            "type": txn_type,
+            "amount": amount,
+            "status": "completed",
+            "details": f"Balance {'added' if operation == 'add' else 'removed'} by admin",
+            "timestamp": datetime.utcnow()
+        }}}
+    )
     return new_balance
 
 def add_transaction(user_id, txn_type, amount, status, details=""):
@@ -162,6 +162,22 @@ def is_banned(user_id):
     user = users_col.find_one({"user_id": user_id})
     return user.get("banned", False) if user else False
 
+def ban_user(user_id):
+    users_col.update_one({"user_id": user_id}, {"$set": {"banned": True}})
+
+def unban_user(user_id):
+    users_col.update_one({"user_id": user_id}, {"$set": {"banned": False}})
+
+def get_user_name(user_id):
+    user = users_col.find_one({"user_id": user_id})
+    if not user:
+        return f"User {user_id}"
+    name = user.get("first_name", "")
+    username = user.get("username", "")
+    if username:
+        return f"{name} (@{username})"
+    return name
+
 # ---------- Deposit ----------
 def create_deposit_request(user_id, amount_bdt, txid):
     request_id = f"{user_id}_{int(time.time())}"
@@ -183,18 +199,17 @@ def approve_deposit(request_id):
     deposit = deposits_col.find_one({"request_id": request_id, "status": "pending"})
     if not deposit:
         return False, None
-    # Update balance: convert BDT to USD
     usd_amount = deposit["amount_bdt"] / DEPOSIT_RATE_USD_TO_BDT
     users_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"balance": usd_amount}})
     add_transaction(deposit["user_id"], "deposit", usd_amount, "completed", f"Deposit of {deposit['amount_bdt']} BDT approved")
     deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "approved"}})
     return True, deposit
 
-def reject_deposit(request_id):
+def reject_deposit(request_id, reason):
     deposit = deposits_col.find_one({"request_id": request_id, "status": "pending"})
     if not deposit:
         return False, None
-    deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "rejected"}})
+    deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "rejected", "reason": reason}})
     return True, deposit
 
 # ---------- Withdraw ----------
@@ -219,7 +234,6 @@ def approve_withdraw(request_id):
     withdraw = withdraws_col.find_one({"request_id": request_id, "status": "pending"})
     if not withdraw:
         return False, None
-    # Deduct balance
     user = users_col.find_one({"user_id": withdraw["user_id"]})
     if user["balance"] < withdraw["amount_usd"]:
         return False, None
@@ -228,11 +242,11 @@ def approve_withdraw(request_id):
     withdraws_col.update_one({"request_id": request_id}, {"$set": {"status": "approved"}})
     return True, withdraw
 
-def reject_withdraw(request_id):
+def reject_withdraw(request_id, reason):
     withdraw = withdraws_col.find_one({"request_id": request_id, "status": "pending"})
     if not withdraw:
         return False, None
-    withdraws_col.update_one({"request_id": request_id}, {"$set": {"status": "rejected"}})
+    withdraws_col.update_one({"request_id": request_id}, {"$set": {"status": "rejected", "reason": reason}})
     return True, withdraw
 
 # ---------- Investment ----------
@@ -246,10 +260,8 @@ def add_investment(user_id, plan_id, amount):
     user = users_col.find_one({"user_id": user_id})
     if user["balance"] < amount:
         return False
-    # Deduct balance
     users_col.update_one({"user_id": user_id}, {"$inc": {"balance": -amount}})
     add_transaction(user_id, "investment", amount, "completed", f"Invested in {plan['name']}")
-    # Save investment
     end_date = datetime.utcnow() + timedelta(days=plan["duration_days"])
     inv_doc = {
         "user_id": user_id,
@@ -265,7 +277,7 @@ def add_investment(user_id, plan_id, amount):
 
 def process_auto_profit():
     while True:
-        time.sleep(86400)  # 24 hours
+        time.sleep(86400)
         logger.info("Checking investments for profit...")
         now = datetime.utcnow()
         active_invs = investments_col.find({"status": "active", "profit_added": False})
@@ -303,23 +315,22 @@ def main_menu():
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
 
-# ======================= WELCOME MESSAGE =======================
 def welcome_message(first_name):
     return (
-        f"🌟 <b>স্বাগতম {first_name}!</b> 🌟\n\n"
-        f"🎉 <b>NextInvest Bot</b> এ আপনাকে দেখে আমরা আনন্দিত!\n\n"
-        f"🔹 <b>আপনি যা করতে পারবেন:</b>\n"
-        f"✅ ডিপোজিট করে ব্যালান্স বাড়ান\n"
-        f"✅ ইনভেস্ট করে লাভ করুন\n"
-        f"✅ রেফারেল লিংক শেয়ার করে আয় করুন\n"
-        f"✅ সহজেই উইথড্র করুন\n\n"
-        f"💡 <b>প্রথম পদক্ষেপ:</b>\n"
-        f"1️⃣ নিচের মেনু থেকে <b>💳 Deposit Money</b> বাটনে ক্লিক করুন\n"
-        f"2️⃣ TXID ও পরিমাণ দিন (শুধু টাকা পাঠানোর রেফারেন্স)\n"
-        f"3️⃣ এডমিন অনুমোদন দিলে ব্যালান্স অ্যাড হবে\n"
-        f"4️⃣ তারপর <b>🚀 Invest Now</b> করে ইনভেস্ট করুন\n\n"
-        f"🎁 <b>বোনাস:</b> সাইনআপে $0.05, প্রতি রেফারে $0.01\n\n"
-        f"🔽 <b>নিচের বাটন ব্যবহার করে শুরু করুন</b> 🔽"
+        f"🌟 <b>Welcome to NextInvest Bot, {first_name}!</b> 🌟\n\n"
+        f"🎉 <b>Your Premium Investment Partner</b> 🎉\n\n"
+        f"🔹 <b>Features:</b>\n"
+        f"   ✅ Deposit BDT → Get USD Balance\n"
+        f"   ✅ Invest & Earn Daily Profit\n"
+        f"   ✅ Refer Friends & Earn Bonus\n"
+        f"   ✅ Fast Withdrawals\n\n"
+        f"💡 <b>How to Start:</b>\n"
+        f"   1️⃣ Click <b>💳 Deposit Money</b> below\n"
+        f"   2️⃣ Enter TXID and amount (BDT)\n"
+        f"   3️⃣ Admin approves → Balance added\n"
+        f"   4️⃣ Click <b>🚀 Invest Now</b> to grow your capital\n\n"
+        f"🎁 <b>Welcome Bonus:</b> $0.05 instantly!\n\n"
+        f"👇 <b>Use the buttons below to begin</b> 👇"
     )
 
 # ======================= COMMAND HANDLERS =======================
@@ -347,17 +358,12 @@ def start_cmd(message):
         ref_by = None
         if len(ref_param) > 1 and ref_param[1].isdigit():
             ref_by = int(ref_param[1])
-        user = create_user(
-            user_id,
-            message.from_user.username,
-            message.from_user.first_name,
-            ref_by
-        )
+        user = create_user(user_id, message.from_user.username, message.from_user.first_name, ref_by)
         bot.send_message(message.chat.id, welcome_message(message.from_user.first_name), parse_mode="HTML")
     else:
-        bot.send_message(message.chat.id, f"👋 Welcome back {user['first_name']}!")
+        bot.send_message(message.chat.id, f"👋 <b>Welcome back, {user['first_name']}!</b>", parse_mode="HTML")
 
-    bot.send_message(message.chat.id, "🔹 Main Menu:", reply_markup=main_menu())
+    bot.send_message(message.chat.id, "🔹 <b>Main Menu</b>", reply_markup=main_menu(), parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "verify")
 def verify_cb(call):
@@ -371,9 +377,12 @@ def verify_cb(call):
 @bot.message_handler(func=lambda m: m.text == "📊 Investment Plans")
 def plans_btn(m):
     plans = get_plans()
-    text = "📈 <b>Investment Plans:</b>\n\n"
+    text = "📈 <b>📊 Investment Plans</b>\n\n"
     for pid, p in plans.items():
-        text += f"🔹 <b>{p['name']}</b>\n   Profit: {p['profit_percent']}%\n   Duration: {p['duration_days']} days\n   Min: ${p['min_amount']}\n\n"
+        text += f"🔹 <b>{p['name']}</b>\n"
+        text += f"   💰 <b>Profit:</b> {p['profit_percent']}%\n"
+        text += f"   ⏳ <b>Duration:</b> {p['duration_days']} days\n"
+        text += f"   💵 <b>Minimum:</b> ${p['min_amount']}\n\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🚀 Invest Now")
@@ -384,7 +393,7 @@ def invest_btn(m):
         return
     plans = get_plans()
     plan_list = "\n".join([f"{pid}: {p['name']} (min ${p['min_amount']}, {p['profit_percent']}%)" for pid, p in plans.items()])
-    msg = bot.send_message(m.chat.id, f"🚀 <b>Send investment in format:</b>\n<code>&lt;plan_id&gt; &lt;amount&gt;</code>\n\nAvailable plans:\n{plan_list}\n\nExample: <code>basic 50</code>", parse_mode="HTML")
+    msg = bot.send_message(m.chat.id, f"🚀 <b>Send investment in format:</b>\n<code>&lt;plan_id&gt; &lt;amount&gt;</code>\n\n📋 <b>Available plans:</b>\n{plan_list}\n\n📝 <b>Example:</b> <code>basic 50</code>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_invest)
 
 def process_invest(m):
@@ -403,7 +412,7 @@ def process_invest(m):
             bot.send_message(m.chat.id, f"❌ Minimum investment for {plan['name']} is ${plan['min_amount']}.")
             return
         if add_investment(m.from_user.id, plan_id, amount):
-            bot.send_message(m.chat.id, f"✅ Investment of ${amount} in {plan['name']} successful!")
+            bot.send_message(m.chat.id, f"✅ <b>Investment of ${amount} in {plan['name']} successful!</b>")
         else:
             bot.send_message(m.chat.id, "❌ Investment failed. Check balance or try again.")
     except Exception as e:
@@ -418,9 +427,9 @@ def wallet_btn(m):
         return
     bal = user.get("balance", 0.0)
     transactions = user.get("transactions", [])[-5:]
-    text = f"💰 <b>Balance:</b> ${bal:.2f}\n\n<b>📜 Last 5 Transactions:</b>\n"
+    text = f"💰 <b>My Wallet</b>\n\n<b>Balance:</b> ${bal:.2f}\n\n<b>📜 Last 5 Transactions:</b>\n"
     for t in transactions[::-1]:
-        text += f"{t['type']}: ${t['amount']} ({t['status']})\n"
+        text += f"   • {t['type']}: ${t['amount']} ({t['status']})\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "💳 Deposit Money")
@@ -450,8 +459,8 @@ def process_deposit_amount(m):
         if amount_bdt <= 0:
             raise ValueError
         usd_amount = amount_bdt / DEPOSIT_RATE_USD_TO_BDT
-        confirm = f"✅ You sent {amount_bdt} BDT → will receive ${usd_amount:.2f} USD.\n\nConfirm? (yes/no)"
-        msg = bot.send_message(m.chat.id, confirm)
+        confirm = f"✅ You sent <b>{amount_bdt} BDT</b> → will receive <b>${usd_amount:.2f} USD</b>.\n\nConfirm? (yes/no)"
+        msg = bot.send_message(m.chat.id, confirm, parse_mode="HTML")
         bot.temp_deposit[m.from_user.id]["amount_bdt"] = amount_bdt
         bot.register_next_step_handler(msg, lambda m2: confirm_deposit(m2, m.from_user.id))
     except:
@@ -467,7 +476,7 @@ def confirm_deposit(m, user_id):
             bot.send_message(m.chat.id, "❌ Missing data. Please start deposit again.")
             return
         req_id = create_deposit_request(user_id, amount_bdt, txid)
-        bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\nAmount: {amount_bdt} BDT\nTXID: <code>{txid}</code>\nRequest ID: <code>{req_id}</code>\n\nAdmin will review it.", parse_mode="HTML")
+        bot.send_message(m.chat.id, f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>{amount_bdt} BDT</b>\n🔑 TXID: <code>{txid}</code>\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", parse_mode="HTML")
         del bot.temp_deposit[user_id]
     else:
         bot.send_message(m.chat.id, "❌ Deposit cancelled.")
@@ -497,8 +506,8 @@ def process_withdraw_amount(m):
         estimated_bdt = amount * WITHDRAW_RATE_USD_TO_BDT - WITHDRAW_SERVICE_CHARGE_BDT
         if estimated_bdt < 0:
             estimated_bdt = 0
-        confirm_text = f"💸 You will receive approximately {estimated_bdt:.2f} BDT after charge.\n\nProceed? (yes/no)"
-        msg = bot.send_message(m.chat.id, confirm_text)
+        confirm_text = f"💸 You will receive approximately <b>{estimated_bdt:.2f} BDT</b> after charge.\n\nProceed? (yes/no)"
+        msg = bot.send_message(m.chat.id, confirm_text, parse_mode="HTML")
         bot.register_next_step_handler(msg, lambda m2: confirm_withdraw(m2, amount))
     except:
         bot.send_message(m.chat.id, "❌ Invalid amount. Use /start.")
@@ -524,7 +533,7 @@ def withdraw_method_cb(call):
 def process_withdraw_account(m, amount, method, original_chat_id):
     account = m.text.strip()
     req_id = create_withdraw_request(m.from_user.id, amount, method, account)
-    bot.send_message(m.chat.id, f"✅ <b>Withdrawal request submitted!</b>\nAmount: ${amount}\nRequest ID: <code>{req_id}</code>\n\nAdmin will process it.", parse_mode="HTML")
+    bot.send_message(m.chat.id, f"✅ <b>Withdrawal request submitted!</b>\n\n💰 Amount: ${amount}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will process it.</b>", parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📈 My Investments")
 def my_investments_btn(m):
@@ -532,11 +541,17 @@ def my_investments_btn(m):
     if not invs:
         bot.send_message(m.chat.id, "📭 You have no investments.")
         return
-    text = "📈 <b>Your Investments:</b>\n"
+    text = "📈 <b>My Investments</b>\n\n"
     for inv in invs:
         plans = get_plans()
         plan = plans.get(inv["plan_id"], {"name": inv["plan_id"]})
-        text += f"Plan: {plan['name']} | Amount: ${inv['amount']} | Status: {inv['status']}\n"
+        text += f"🔹 <b>{plan['name']}</b>\n"
+        text += f"   💰 Amount: ${inv['amount']}\n"
+        text += f"   📊 Status: {inv['status']}\n"
+        if inv["status"] == "active":
+            end = inv["end_date"].strftime("%Y-%m-%d")
+            text += f"   ⏳ Ends: {end}\n"
+        text += "\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "💸 Profit History")
@@ -546,9 +561,9 @@ def profit_btn(m):
     if not profits:
         bot.send_message(m.chat.id, "📭 No profit history found.")
         return
-    text = "💸 <b>Last 5 Profits:</b>\n"
+    text = "💸 <b>Profit History</b>\n\n"
     for p in profits[-5:]:
-        text += f"${p['amount']} on {p['timestamp'].strftime('%Y-%m-%d')}\n"
+        text += f"   • ${p['amount']} on {p['timestamp'].strftime('%Y-%m-%d')}\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🤝 Referral Program")
@@ -559,7 +574,7 @@ def referral_btn(m):
     referrals = user.get("referrals", [])
     settings = get_settings()
     bonus = settings.get("referral_bonus", 0.01)
-    text = f"🔗 <b>Your referral link:</b>\n<code>{ref_link}</code>\n\n👥 <b>Total referrals:</b> {len(referrals)}\n💰 <b>Earn ${bonus} per referral!</b>"
+    text = f"🔗 <b>Your Referral Link</b>\n\n<code>{ref_link}</code>\n\n👥 <b>Total referrals:</b> {len(referrals)}\n💰 <b>Earn ${bonus} per referral!</b>"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📤 Share Link", switch_inline_query=ref_link))
     bot.send_message(m.chat.id, text, reply_markup=markup, parse_mode="HTML")
@@ -572,12 +587,19 @@ def profile_btn(m):
         return
     bal = user.get("balance", 0.0)
     referrals = user.get("referrals", [])
-    text = f"👤 <b>Name:</b> {user.get('first_name', 'N/A')}\n🆔 <b>ID:</b> {m.from_user.id}\n💰 <b>Balance:</b> ${bal:.2f}\n👥 <b>Referrals:</b> {len(referrals)}\n📅 <b>Joined:</b> {user.get('joined', datetime.utcnow()).strftime('%Y-%m-%d')}"
+    text = f"👤 <b>My Profile</b>\n\n"
+    text += f"📛 <b>Name:</b> {user.get('first_name', 'N/A')}\n"
+    if user.get("username"):
+        text += f"🔖 <b>Username:</b> @{user['username']}\n"
+    text += f"🆔 <b>ID:</b> <code>{m.from_user.id}</code>\n"
+    text += f"💰 <b>Balance:</b> ${bal:.2f}\n"
+    text += f"👥 <b>Referrals:</b> {len(referrals)}\n"
+    text += f"📅 <b>Joined:</b> {user.get('joined', datetime.utcnow()).strftime('%Y-%m-%d')}"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📩 Support & Help")
 def support_btn(m):
-    bot.send_message(m.chat.id, "📩 <b>For support contact:</b> @dark_princes12", parse_mode="HTML")
+    bot.send_message(m.chat.id, "📩 <b>Support & Help</b>\n\nFor any assistance, please contact:\n👑 Owner: @dark_princes12\n📢 Channel: " + FORCE_CHANNEL + "\n👥 Group: " + FORCE_GROUP, parse_mode="HTML")
 
 # ======================= ADMIN PANEL =======================
 def admin_menu():
@@ -587,6 +609,7 @@ def admin_menu():
         "📥 Deposit", "📤 Withdraw",
         "📊 Stats", "📢 Broadcast",
         "📦 Plans", "🛑 Ban",
+        "🔓 Unban User", "📝 Update Plans",
         "👑 Add Admin", "🗑 Remove Admin",
         "💸 Referral Control", "⚙ System Settings",
         "🔙 User Menu"
@@ -599,24 +622,25 @@ def admin_panel(message):
     if not is_admin(message.from_user.id):
         bot.send_message(message.chat.id, "⛔ Unauthorized.")
         return
-    bot.send_message(message.chat.id, "🔧 <b>Admin Panel:</b>", reply_markup=admin_menu(), parse_mode="HTML")
+    bot.send_message(message.chat.id, "🔧 <b>Admin Panel</b>", reply_markup=admin_menu(), parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🔙 User Menu" and is_admin(m.from_user.id))
 def back_to_user_menu(m):
-    bot.send_message(m.chat.id, "🔹 Main Menu:", reply_markup=main_menu())
+    bot.send_message(m.chat.id, "🔹 <b>Main Menu</b>", reply_markup=main_menu(), parse_mode="HTML")
 
 # ---------- Admin Handlers ----------
 @bot.message_handler(func=lambda m: m.text == "👥 Users" and is_admin(m.from_user.id))
 def admin_users(m):
     users = list(users_col.find().limit(10))
-    text = f"👥 <b>Total Users:</b> {users_col.count_documents({})}\n"
+    total = users_col.count_documents({})
+    text = f"👥 <b>Total Users:</b> {total}\n\n<b>First 10 Users:</b>\n"
     for u in users:
-        text += f"{u['user_id']} - {u.get('first_name', 'N/A')} (${u.get('balance',0)})\n"
+        text += f"• <code>{u['user_id']}</code> – {u.get('first_name', 'N/A')} (${u.get('balance',0)})\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "💰 Balance" and is_admin(m.from_user.id))
 def admin_balance(m):
-    msg = bot.send_message(m.chat.id, "💸 <b>Send:</b> <code>user_id amount</code> to add, or <code>user_id -amount</code> to remove.\nExample: <code>123456 10</code> or <code>123456 -10</code>", parse_mode="HTML")
+    msg = bot.send_message(m.chat.id, "💸 <b>Balance Control</b>\n\nSend: <code>user_id amount</code> to add, or <code>user_id -amount</code> to remove.\n\nExample: <code>123456 10</code> or <code>123456 -10</code>", parse_mode="HTML")
     bot.register_next_step_handler(msg, balance_admin)
 
 def balance_admin(m):
@@ -626,11 +650,11 @@ def balance_admin(m):
         amt = float(parts[1])
         if amt > 0:
             update_balance(uid, amt, "add")
-            msg = f"✅ Added ${amt} to user {uid}"
+            msg = f"✅ Added ${amt} to user <code>{uid}</code>"
         else:
             update_balance(uid, abs(amt), "subtract")
-            msg = f"✅ Removed ${abs(amt)} from user {uid}"
-        bot.send_message(m.chat.id, msg)
+            msg = f"✅ Removed ${abs(amt)} from user <code>{uid}</code>"
+        bot.send_message(m.chat.id, msg, parse_mode="HTML")
     except:
         bot.send_message(m.chat.id, "❌ Invalid format. Use: user_id amount")
 
@@ -645,7 +669,7 @@ def admin_deposits(m):
         markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
                    InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
         bot.send_message(m.chat.id,
-                         f"📥 <b>Deposit Request</b>\nUser: <code>{dep['user_id']}</code>\nAmount: {dep['amount_bdt']} BDT\nTXID: <code>{dep['txid']}</code>",
+                         f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>{dep['amount_bdt']} BDT</b>\n🔑 TXID: <code>{dep['txid']}</code>",
                          reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and is_admin(m.from_user.id))
@@ -659,7 +683,7 @@ def admin_withdraws(m):
         markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
                    InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
         bot.send_message(m.chat.id,
-                         f"📤 <b>Withdraw Request</b>\nUser: <code>{wd['user_id']}</code>\nAmount: ${wd['amount_usd']}\nMethod: {wd['method']}\nAccount: <code>{wd['account']}</code>",
+                         f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method']}\n📞 Account: <code>{wd['account']}</code>",
                          reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats" and is_admin(m.from_user.id))
@@ -667,12 +691,12 @@ def admin_stats(m):
     total_users = users_col.count_documents({})
     total_balance = sum(u.get("balance", 0) for u in users_col.find())
     total_invested = sum(inv["amount"] for inv in investments_col.find({"status": "active"}))
-    text = f"📊 <b>Stats:</b>\n👥 Users: {total_users}\n💰 Total Balance: ${total_balance:.2f}\n💸 Total Invested: ${total_invested:.2f}"
+    text = f"📊 <b>Statistics</b>\n\n👥 Users: <b>{total_users}</b>\n💰 Total Balance: <b>${total_balance:.2f}</b>\n💸 Total Invested: <b>${total_invested:.2f}</b>"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📢 Broadcast" and is_admin(m.from_user.id))
 def admin_broadcast(m):
-    msg = bot.send_message(m.chat.id, "📢 <b>Send broadcast message:</b>", parse_mode="HTML")
+    msg = bot.send_message(m.chat.id, "📢 <b>Broadcast Message</b>\n\nSend the message you want to broadcast to all users:", parse_mode="HTML")
     bot.register_next_step_handler(msg, broadcast_msg)
 
 def broadcast_msg(m):
@@ -684,52 +708,97 @@ def broadcast_msg(m):
             count += 1
         except:
             pass
-    bot.send_message(m.chat.id, f"✅ Broadcast sent to {count} users.")
+    bot.send_message(m.chat.id, f"✅ Broadcast sent to <b>{count}</b> users.", parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📦 Plans" and is_admin(m.from_user.id))
 def admin_plans(m):
     plans = get_plans()
-    text = "📦 <b>Current Plans:</b>\n"
+    text = "📦 <b>Current Investment Plans</b>\n\n"
     for pid, p in plans.items():
-        text += f"{pid}: {p['name']} - {p['profit_percent']}%, {p['duration_days']} days, min ${p['min_amount']}\n"
-    text += "\nTo edit, use MongoDB directly (not implemented in this demo)."
+        text += f"🔹 <b>{p['name']}</b> (<code>{pid}</code>)\n"
+        text += f"   Profit: {p['profit_percent']}%\n"
+        text += f"   Duration: {p['duration_days']} days\n"
+        text += f"   Minimum: ${p['min_amount']}\n\n"
     bot.send_message(m.chat.id, text, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🛑 Ban" and is_admin(m.from_user.id))
 def admin_ban(m):
-    msg = bot.send_message(m.chat.id, "🚫 <b>Enter user ID to ban:</b>", parse_mode="HTML")
-    bot.register_next_step_handler(msg, ban_user)
+    msg = bot.send_message(m.chat.id, "🚫 <b>Ban User</b>\n\nEnter user ID to ban:", parse_mode="HTML")
+    bot.register_next_step_handler(msg, ban_user_cmd)
 
-def ban_user(m):
+def ban_user_cmd(m):
     try:
         uid = int(m.text)
-        result = users_col.update_one({"user_id": uid}, {"$set": {"banned": True}})
-        if result.modified_count:
-            bot.send_message(m.chat.id, f"✅ User {uid} banned.")
-        else:
-            bot.send_message(m.chat.id, "❌ User not found.")
+        ban_user(uid)
+        bot.send_message(m.chat.id, f"✅ User <code>{uid}</code> has been banned.", parse_mode="HTML")
     except:
         bot.send_message(m.chat.id, "❌ Invalid user ID.")
 
+@bot.message_handler(func=lambda m: m.text == "🔓 Unban User" and is_admin(m.from_user.id))
+def admin_unban(m):
+    msg = bot.send_message(m.chat.id, "🔓 <b>Unban User</b>\n\nEnter user ID to unban:", parse_mode="HTML")
+    bot.register_next_step_handler(msg, unban_user_cmd)
+
+def unban_user_cmd(m):
+    try:
+        uid = int(m.text)
+        unban_user(uid)
+        bot.send_message(m.chat.id, f"✅ User <code>{uid}</code> has been unbanned.", parse_mode="HTML")
+    except:
+        bot.send_message(m.chat.id, "❌ Invalid user ID.")
+
+@bot.message_handler(func=lambda m: m.text == "📝 Update Plans" and is_admin(m.from_user.id))
+def admin_update_plans(m):
+    plans = get_plans()
+    text = "📝 <b>Update Investment Plans</b>\n\n"
+    for pid, p in plans.items():
+        text += f"<b>{pid}</b>: {p['name']} | {p['profit_percent']}% | {p['duration_days']}d | ${p['min_amount']}\n"
+    text += "\nEnter new plan details in format:\n<code>plan_id name profit% duration_days min_amount</code>\n\nExample: <code>basic Basic 20 7 10</code>"
+    bot.send_message(m.chat.id, text, parse_mode="HTML")
+    bot.register_next_step_handler(m, process_plan_update)
+
+def process_plan_update(m):
+    try:
+        parts = m.text.split()
+        if len(parts) != 5:
+            raise ValueError
+        pid = parts[0].lower()
+        name = parts[1]
+        profit = float(parts[2])
+        days = int(parts[3])
+        min_amt = float(parts[4])
+        plans = get_plans()
+        plans[pid] = {
+            "name": name,
+            "profit_percent": profit,
+            "duration_days": days,
+            "min_amount": min_amt
+        }
+        update_plans(plans)
+        bot.send_message(m.chat.id, f"✅ Plan <code>{pid}</code> updated successfully!", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Plan update error: {e}")
+        bot.send_message(m.chat.id, "❌ Invalid format. Use: plan_id name profit% duration_days min_amount")
+
 @bot.message_handler(func=lambda m: m.text == "👑 Add Admin" and m.from_user.id == OWNER_ID)
 def admin_add_admin(m):
-    msg = bot.send_message(m.chat.id, "👑 <b>Enter user ID to add as admin:</b>", parse_mode="HTML")
+    msg = bot.send_message(m.chat.id, "👑 <b>Add Admin</b>\n\nEnter user ID to add as admin:", parse_mode="HTML")
     bot.register_next_step_handler(msg, add_admin)
 
 def add_admin(m):
     try:
         uid = int(m.text)
         if admins_col.find_one({"user_id": uid}):
-            bot.send_message(m.chat.id, f"❌ User {uid} is already an admin.")
+            bot.send_message(m.chat.id, f"❌ User <code>{uid}</code> is already an admin.", parse_mode="HTML")
             return
         admins_col.insert_one({"user_id": uid})
-        bot.send_message(m.chat.id, f"✅ User {uid} is now an admin.")
+        bot.send_message(m.chat.id, f"✅ User <code>{uid}</code> is now an admin.", parse_mode="HTML")
     except:
         bot.send_message(m.chat.id, "❌ Invalid user ID.")
 
 @bot.message_handler(func=lambda m: m.text == "🗑 Remove Admin" and m.from_user.id == OWNER_ID)
 def admin_remove_admin(m):
-    msg = bot.send_message(m.chat.id, "🗑 <b>Enter user ID to remove from admin:</b>", parse_mode="HTML")
+    msg = bot.send_message(m.chat.id, "🗑 <b>Remove Admin</b>\n\nEnter user ID to remove from admin:", parse_mode="HTML")
     bot.register_next_step_handler(msg, remove_admin)
 
 def remove_admin(m):
@@ -740,9 +809,9 @@ def remove_admin(m):
             return
         result = admins_col.delete_one({"user_id": uid})
         if result.deleted_count:
-            bot.send_message(m.chat.id, f"✅ User {uid} is no longer an admin.")
+            bot.send_message(m.chat.id, f"✅ User <code>{uid}</code> is no longer an admin.", parse_mode="HTML")
         else:
-            bot.send_message(m.chat.id, f"❌ User {uid} is not an admin.")
+            bot.send_message(m.chat.id, f"❌ User <code>{uid}</code> is not an admin.", parse_mode="HTML")
     except:
         bot.send_message(m.chat.id, "❌ Invalid user ID.")
 
@@ -750,7 +819,7 @@ def remove_admin(m):
 def admin_referral_control(m):
     settings = get_settings()
     current = settings.get("referral_bonus", 0.01)
-    msg = bot.send_message(m.chat.id, f"💸 <b>Current referral bonus:</b> ${current}\n\nSend new bonus amount (e.g., 0.02):", parse_mode="HTML")
+    msg = bot.send_message(m.chat.id, f"💸 <b>Referral Bonus Control</b>\n\nCurrent bonus: <b>${current}</b>\n\nSend new bonus amount (e.g., 0.02):", parse_mode="HTML")
     bot.register_next_step_handler(msg, set_referral_bonus)
 
 def set_referral_bonus(m):
@@ -759,7 +828,7 @@ def set_referral_bonus(m):
         if new_bonus <= 0:
             raise ValueError
         update_settings({"referral_bonus": new_bonus})
-        bot.send_message(m.chat.id, f"✅ Referral bonus updated to ${new_bonus}.")
+        bot.send_message(m.chat.id, f"✅ Referral bonus updated to <b>${new_bonus}</b>.", parse_mode="HTML")
     except:
         bot.send_message(m.chat.id, "❌ Invalid amount. Please send a number > 0.")
 
@@ -768,9 +837,9 @@ def admin_system_settings(m):
     settings = get_settings()
     text = (
         "⚙ <b>System Settings</b>\n\n"
-        f"Deposit: {'✅ Enabled' if settings.get('deposit_enabled', True) else '❌ Disabled'}\n"
-        f"Withdraw: {'✅ Enabled' if settings.get('withdraw_enabled', True) else '❌ Disabled'}\n"
-        f"Maintenance: {'🔧 Enabled' if settings.get('maintenance_mode', False) else '✅ Disabled'}\n\n"
+        f"💳 Deposit: {'✅ Enabled' if settings.get('deposit_enabled', True) else '❌ Disabled'}\n"
+        f"💸 Withdraw: {'✅ Enabled' if settings.get('withdraw_enabled', True) else '❌ Disabled'}\n"
+        f"🔧 Maintenance: {'🔧 ON' if settings.get('maintenance_mode', False) else '✅ OFF'}\n\n"
         "Use buttons below to toggle:"
     )
     markup = InlineKeyboardMarkup(row_width=2)
@@ -805,34 +874,39 @@ def sys_toggle_cb(call):
     bot.answer_callback_query(call.id, msg)
     bot.edit_message_text("✅ Settings updated. Use /admin again to see changes.", call.message.chat.id, call.message.message_id)
 
-# ------------------- Admin Approval Callbacks (with formatted auto-posts) -------------------
-def format_auto_post(action, type_, user_id, amount, txid=None, method=None, account=None):
+# ------------------- Admin Approval Callbacks (with reason) -------------------
+def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, account=None):
+    user_name = get_user_name(user_id)
     if type_ == "deposit":
         if action == "approve":
             emoji = "✅"
             title = "Deposit Approved"
             details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>"
-        else:
+        else:  # reject
             emoji = "❌"
             title = "Deposit Rejected"
             details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>"
-    else:
+            if reason:
+                details += f"\n💬 <b>Reason:</b> {reason}"
+    else:  # withdraw
         if action == "approve":
             emoji = "✅"
             title = "Withdrawal Approved"
             details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method}\n📞 Account: <code>{account}</code>"
-        else:
+        else:  # reject
             emoji = "❌"
             title = "Withdrawal Rejected"
             details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method}\n📞 Account: <code>{account}</code>"
-    user_link = f'<a href="tg://user?id={user_id}">User {user_id}</a>'
+            if reason:
+                details += f"\n💬 <b>Reason:</b> {reason}"
     return (
         f"{emoji} <b>{title}</b> {emoji}\n\n"
-        f"👤 {user_link}\n"
+        f"👤 <b>User:</b> {user_name} (<code>{user_id}</code>)\n"
         f"{details}\n\n"
         f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
     )
 
+# Deposit approve (no reason needed)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_dep|"))
 def approve_dep_cb(call):
     if not is_admin(call.from_user.id):
@@ -853,26 +927,37 @@ def approve_dep_cb(call):
     else:
         bot.answer_callback_query(call.id, "❌ Failed or already processed.")
 
+# Deposit reject (ask for reason)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_dep|"))
 def reject_dep_cb(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    success, dep = reject_deposit(req_id)
+    # Ask for reason
+    msg = bot.send_message(call.message.chat.id, "💬 Please enter the reason for rejecting this deposit:")
+    bot.register_next_step_handler(msg, lambda m: process_deposit_reject(m, req_id, call.message.chat.id, call.message.message_id))
+
+def process_deposit_reject(m, req_id, chat_id, message_id):
+    reason = m.text.strip()
+    if not reason:
+        reason = "No reason provided"
+    success, dep = reject_deposit(req_id, reason)
     if success:
-        bot.answer_callback_query(call.id, "❌ Deposit rejected.")
-        bot.edit_message_text("❌ Deposit rejected.", call.message.chat.id, call.message.message_id)
-        bot.send_message(dep["user_id"], "❌ Your deposit request was rejected.")
-        msg_text = format_auto_post("reject", "deposit", dep["user_id"], dep["amount_bdt"], txid=dep["txid"])
+        bot.answer_callback_query(m.message_id, "❌ Deposit rejected.")
+        bot.edit_message_text("❌ Deposit rejected.", chat_id, message_id)
+        bot.send_message(dep["user_id"], f"❌ Your deposit request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
+        msg_text = format_auto_post("reject", "deposit", dep["user_id"], dep["amount_bdt"], reason=reason, txid=dep["txid"])
         try:
             bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
             bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Auto-post error: {e}")
+        bot.send_message(chat_id, f"✅ Deposit request {req_id} has been rejected with reason: {reason}")
     else:
-        bot.answer_callback_query(call.id, "❌ Failed or already processed.")
+        bot.send_message(chat_id, "❌ Failed or already processed.")
 
+# Withdraw approve (no reason needed)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_wd|"))
 def approve_wd_cb(call):
     if not is_admin(call.from_user.id):
@@ -893,25 +978,34 @@ def approve_wd_cb(call):
     else:
         bot.answer_callback_query(call.id, "❌ Failed or already processed.")
 
+# Withdraw reject (ask for reason)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_wd|"))
 def reject_wd_cb(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
     req_id = call.data.split("|")[1]
-    success, wd = reject_withdraw(req_id)
+    msg = bot.send_message(call.message.chat.id, "💬 Please enter the reason for rejecting this withdrawal:")
+    bot.register_next_step_handler(msg, lambda m: process_withdraw_reject(m, req_id, call.message.chat.id, call.message.message_id))
+
+def process_withdraw_reject(m, req_id, chat_id, message_id):
+    reason = m.text.strip()
+    if not reason:
+        reason = "No reason provided"
+    success, wd = reject_withdraw(req_id, reason)
     if success:
-        bot.answer_callback_query(call.id, "❌ Withdraw rejected.")
-        bot.edit_message_text("❌ Withdraw rejected.", call.message.chat.id, call.message.message_id)
-        bot.send_message(wd["user_id"], "❌ Your withdrawal request was rejected.")
-        msg_text = format_auto_post("reject", "withdraw", wd["user_id"], wd["amount_usd"], method=wd["method"], account=wd["account"])
+        bot.answer_callback_query(m.message_id, "❌ Withdraw rejected.")
+        bot.edit_message_text("❌ Withdraw rejected.", chat_id, message_id)
+        bot.send_message(wd["user_id"], f"❌ Your withdrawal request was rejected.\n\n<b>Reason:</b> {reason}", parse_mode="HTML")
+        msg_text = format_auto_post("reject", "withdraw", wd["user_id"], wd["amount_usd"], reason=reason, method=wd["method"], account=wd["account"])
         try:
             bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
             bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Auto-post error: {e}")
+        bot.send_message(chat_id, f"✅ Withdrawal request {req_id} has been rejected with reason: {reason}")
     else:
-        bot.answer_callback_query(call.id, "❌ Failed or already processed.")
+        bot.send_message(chat_id, "❌ Failed or already processed.")
 
 # ======================= FLASK HEALTH CHECK =======================
 flask_app = Flask(__name__)
