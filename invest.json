@@ -1,0 +1,22 @@
+{
+  "plans": {
+    "basic": {
+      "name": "Basic",
+      "profit_percent": 20,
+      "duration_days": 7,
+      "min_amount": 10
+    },
+    "premium": {
+      "name": "Premium",
+      "profit_percent": 30,
+      "duration_days": 14,
+      "min_amount": 50
+    },
+    "gold": {
+      "name": "Gold",
+      "profit_percent": 40,
+      "duration_days": 30,
+      "min_amount": 100
+    }
+  }
+}
