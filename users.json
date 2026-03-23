@@ -70,6 +70,13 @@
         "status": "completed",
         "details": "Added by admin",
         "timestamp": "2026-03-23T18:28:17.689185"
+      },
+      {
+        "type": "admin_add",
+        "amount": 100000000000000.0,
+        "status": "completed",
+        "details": "Added by admin",
+        "timestamp": "2026-03-23T18:29:17.937640"
       }
     ],
     "banned": false
