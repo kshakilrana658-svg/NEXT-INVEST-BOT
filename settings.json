@@ -1,5 +1,5 @@
 {
-  "referral_bonus": 0.5,
+  "referral_bonus": 0.001,
   "deposit_enabled": true,
   "withdraw_enabled": true,
   "maintenance_mode": true
