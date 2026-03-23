@@ -121,14 +121,13 @@ def is_user_banned(user_id):
     return user.get("banned", False) if user else False
 
 # ---------- Deposit Functions ----------
-def create_deposit_request(user_id, amount_bdt, txid, screenshot_file_id):
+def create_deposit_request(user_id, amount_bdt, txid):
     deposits = github_read("deposit.json")
     req_id = f"{user_id}_{int(time.time())}"
     deposits[req_id] = {
         "user_id": user_id,
         "amount_bdt": amount_bdt,
         "txid": txid,
-        "screenshot_file_id": screenshot_file_id,
         "status": "pending",
         "timestamp": datetime.now().isoformat()
     }
@@ -148,16 +147,16 @@ def approve_deposit(req_id):
         add_transaction(req["user_id"], "deposit", usd_amount, "completed", f"Deposit of {req['amount_bdt']} BDT approved")
         deposits[req_id]["status"] = "approved"
         github_write("deposit.json", deposits)
-        return True
-    return False
+        return True, req
+    return False, None
 
 def reject_deposit(req_id):
     deposits = github_read("deposit.json")
     if req_id in deposits and deposits[req_id]["status"] == "pending":
         deposits[req_id]["status"] = "rejected"
         github_write("deposit.json", deposits)
-        return True
-    return False
+        return True, deposits[req_id]
+    return False, None
 
 # ---------- Withdraw Functions ----------
 def create_withdraw_request(user_id, amount_usd, method, account):
@@ -184,21 +183,21 @@ def approve_withdraw(req_id):
         req = withdraws[req_id]
         new_bal = update_balance(req["user_id"], req["amount_usd"], "subtract")
         if new_bal < 0:
-            update_balance(req["user_id"], req["amount_usd"], "add")  # revert
-            return False
-        add_transaction(req["user_id"], "withdraw", req["amount_usd"], "completed", f"Withdraw approved")
+            update_balance(req["user_id"], req["amount_usd"], "add")
+            return False, None
+        add_transaction(req["user_id"], "withdraw", req["amount_usd"], "completed", "Withdraw approved")
         withdraws[req_id]["status"] = "approved"
         github_write("withdraw.json", withdraws)
-        return True
-    return False
+        return True, req
+    return False, None
 
 def reject_withdraw(req_id):
     withdraws = github_read("withdraw.json")
     if req_id in withdraws and withdraws[req_id]["status"] == "pending":
         withdraws[req_id]["status"] = "rejected"
         github_write("withdraw.json", withdraws)
-        return True
-    return False
+        return True, withdraws[req_id]
+    return False, None
 
 # ---------- Investment Functions ----------
 def get_plans():
@@ -351,15 +350,14 @@ def plans_btn(m):
         text += f"🔹 {p['name']}\n   Profit: {p['profit_percent']}%\n   Duration: {p['duration_days']} days\n   Min: ${p['min_amount']}\n\n"
     bot.send_message(m.chat.id, text)
 
+# --- INVEST FIX ---
 @bot.message_handler(func=lambda m: m.text == "🚀 Invest")
 def invest_btn(m):
+    # Ask for plan and amount in one step
     plans = get_plans()
-    text = "📈 Available Plans:\n"
-    for pid, p in plans.items():
-        text += f"{pid}: {p['name']} - {p['profit_percent']}% profit, ${p['min_amount']} min\n"
-    text += "\nSend investment in format: <plan_id> <amount>\nExample: basic 50"
-    bot.send_message(m.chat.id, text)
-    bot.register_next_step_handler(m, process_invest)
+    plan_list = "\n".join([f"{pid}: {p['name']} (min ${p['min_amount']}, {p['profit_percent']}%)" for pid, p in plans.items()])
+    msg = bot.send_message(m.chat.id, f"Send investment in format:\n<plan_id> <amount>\n\nAvailable plans:\n{plan_list}\n\nExample: basic 50")
+    bot.register_next_step_handler(msg, process_invest)
 
 def process_invest(m):
     try:
@@ -383,6 +381,7 @@ def process_invest(m):
     except:
         bot.send_message(m.chat.id, "Invalid format. Use: plan_id amount")
 
+# --- WALLET, DEPOSIT, WITHDRAW, etc. ---
 @bot.message_handler(func=lambda m: m.text == "💰 Wallet")
 def wallet_btn(m):
     bal = get_user_balance(m.from_user.id)
@@ -403,25 +402,14 @@ def process_deposit_txid(m):
     if not txid:
         bot.send_message(m.chat.id, "TXID cannot be empty. Please start deposit again.")
         return
+    # Store TXID temporarily
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[m.from_user.id] = {"txid": txid}
-    bot.send_message(m.chat.id, "Now send the screenshot of the transaction (as a photo).")
-    bot.register_next_step_handler(m, process_deposit_screenshot)
-
-def process_deposit_screenshot(m):
-    if not m.photo:
-        bot.send_message(m.chat.id, "Please send a photo (screenshot). Use /start to try again.")
-        return
-    file_id = m.photo[-1].file_id
-    txid = bot.temp_deposit.get(m.from_user.id, {}).get("txid")
-    if not txid:
-        bot.send_message(m.chat.id, "TXID missing. Please start deposit again.")
-        return
     bot.send_message(m.chat.id, "Enter the amount in BDT you sent:")
-    bot.register_next_step_handler(m, lambda m2: process_deposit_amount(m2, txid, file_id))
+    bot.register_next_step_handler(m, process_deposit_amount)
 
-def process_deposit_amount(m, txid, file_id):
+def process_deposit_amount(m):
     try:
         amount_bdt = float(m.text)
         if amount_bdt <= 0:
@@ -429,7 +417,11 @@ def process_deposit_amount(m, txid, file_id):
     except:
         bot.send_message(m.chat.id, "Invalid amount. Please start deposit again.")
         return
-    req_id = create_deposit_request(m.from_user.id, amount_bdt, txid, file_id)
+    txid = bot.temp_deposit.get(m.from_user.id, {}).get("txid")
+    if not txid:
+        bot.send_message(m.chat.id, "TXID missing. Please start deposit again.")
+        return
+    req_id = create_deposit_request(m.from_user.id, amount_bdt, txid)
     bot.send_message(m.chat.id, f"✅ Deposit request submitted! Amount: {amount_bdt} BDT\nTXID: {txid}\nRequest ID: {req_id}\n\nAdmin will review it.")
     if hasattr(bot, 'temp_deposit') and m.from_user.id in bot.temp_deposit:
         del bot.temp_deposit[m.from_user.id]
@@ -449,22 +441,25 @@ def process_withdraw_amount(m):
         if bal < amount:
             bot.send_message(m.chat.id, "Insufficient balance.")
             return
-        markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add("Bkash", "Nagad", "Rocket")
-        msg = bot.send_message(m.chat.id, "Select withdrawal method:", reply_markup=markup)
-        bot.register_next_step_handler(msg, lambda m2: process_withdraw_method(m2, amount))
+        # Use inline keyboard for methods
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Bkash", callback_data=f"wd_method_bkash_{amount}"))
+        markup.add(InlineKeyboardButton("Nagad", callback_data=f"wd_method_nagad_{amount}"))
+        markup.add(InlineKeyboardButton("Rocket", callback_data=f"wd_method_rocket_{amount}"))
+        bot.send_message(m.chat.id, "Select withdrawal method:", reply_markup=markup)
     except:
         bot.send_message(m.chat.id, "Invalid amount. Use /start.")
 
-def process_withdraw_method(m, amount):
-    method = m.text
-    if method not in ["Bkash", "Nagad", "Rocket"]:
-        bot.send_message(m.chat.id, "Invalid method. Use /start to go back.")
-        return
-    msg = bot.send_message(m.chat.id, f"Enter your {method} account number:")
-    bot.register_next_step_handler(msg, lambda m2: process_withdraw_account(m2, amount, method))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("wd_method_"))
+def withdraw_method_cb(call):
+    parts = call.data.split("_")
+    method = parts[2]
+    amount = float(parts[3])
+    # Ask for account number
+    msg = bot.send_message(call.message.chat.id, f"Enter your {method} account number:")
+    bot.register_next_step_handler(msg, lambda m: process_withdraw_account(m, amount, method, call.message.chat.id))
 
-def process_withdraw_account(m, amount, method):
+def process_withdraw_account(m, amount, method, original_chat_id):
     account = m.text.strip()
     req_id = create_withdraw_request(m.from_user.id, amount, method, account)
     bot.send_message(m.chat.id, f"✅ Withdrawal request submitted! Amount: ${amount}\nRequest ID: {req_id}\n\nAdmin will process it.")
@@ -567,9 +562,8 @@ def admin_deposits(m):
         return
     for req_id, req in pending.items():
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📸 Screenshot", callback_data=f"view_dep_screenshot_{req_id}"))
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"approve_dep_{req_id}"),
-                   InlineKeyboardButton("❌ Reject", callback_data=f"reject_dep_{req_id}"))
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep_{req_id}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep_{req_id}"))
         bot.send_message(m.chat.id,
                          f"Deposit Request:\nUser: {req['user_id']}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}\nStatus: {req['status']}",
                          reply_markup=markup)
@@ -582,8 +576,8 @@ def admin_withdraws(m):
         return
     for req_id, req in pending.items():
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"approve_wd_{req_id}"),
-                   InlineKeyboardButton("❌ Reject", callback_data=f"reject_wd_{req_id}"))
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd_{req_id}"),
+                   InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd_{req_id}"))
         bot.send_message(m.chat.id,
                          f"Withdraw Request:\nUser: {req['user_id']}\nAmount: ${req['amount_usd']}\nMethod: {req['method']}\nAccount: {req['account']}",
                          reply_markup=markup)
@@ -643,95 +637,79 @@ def ban_user(m):
     except:
         bot.send_message(m.chat.id, "Invalid user ID.")
 
-# ------------------- Deposit/Withdraw Approval Callbacks -------------------
-@bot.callback_query_handler(func=lambda call: call.data.startswith("view_dep_screenshot_"))
-def view_dep_screenshot(call):
-    req_id = call.data.split("_")[3]
-    deposits = github_read("deposit.json")
-    if req_id in deposits:
-        file_id = deposits[req_id]["screenshot_file_id"]
-        bot.send_photo(call.message.chat.id, file_id, caption=f"Screenshot for deposit {req_id}")
-    else:
-        bot.answer_callback_query(call.id, "Request not found.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("approve_dep_"))
+# ------------------- Admin Approve/Reject Callbacks -------------------
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_dep_"))
 def approve_dep_cb(call):
-    req_id = call.data.split("_")[2]
-    if approve_deposit(req_id):
+    req_id = call.data.split("_")[3]
+    success, req = approve_deposit(req_id)
+    if success:
         bot.answer_callback_query(call.id, "Deposit approved.")
         bot.edit_message_text("Deposit approved.", call.message.chat.id, call.message.message_id)
-        dep = github_read("deposit.json").get(req_id, {})
-        user_id = dep.get("user_id")
-        if user_id:
-            # Notify user
-            bot.send_message(user_id, "✅ Your deposit has been approved! Balance updated.")
-            # Auto-post to channel and group
-            msg_text = f"📢 Deposit approved!\nUser: {user_id}\nAmount: {dep['amount_bdt']} BDT\nTXID: {dep['txid']}"
-            try:
-                bot.send_message(FORCE_CHANNEL, msg_text)
-                bot.send_message(FORCE_GROUP, msg_text)
-            except:
-                pass
+        # Notify user
+        user_id = req["user_id"]
+        bot.send_message(user_id, "✅ Your deposit has been approved! Balance updated.")
+        # Auto-post to channel/group
+        msg_text = f"📢 Deposit approved!\nUser: {user_id}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}"
+        try:
+            bot.send_message(FORCE_CHANNEL, msg_text)
+            bot.send_message(FORCE_GROUP, msg_text)
+        except:
+            pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
-    # Remove request from display by refreshing (the original message remains but is marked processed)
-    # The request is now status approved, so it won't appear in pending next time.
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("reject_dep_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_dep_"))
 def reject_dep_cb(call):
-    req_id = call.data.split("_")[2]
-    if reject_deposit(req_id):
+    req_id = call.data.split("_")[3]
+    success, req = reject_deposit(req_id)
+    if success:
         bot.answer_callback_query(call.id, "Deposit rejected.")
         bot.edit_message_text("Deposit rejected.", call.message.chat.id, call.message.message_id)
-        dep = github_read("deposit.json").get(req_id, {})
-        user_id = dep.get("user_id")
-        if user_id:
-            bot.send_message(user_id, "❌ Your deposit request was rejected.")
-            msg_text = f"❌ Deposit rejected!\nUser: {user_id}\nAmount: {dep['amount_bdt']} BDT\nTXID: {dep['txid']}"
-            try:
-                bot.send_message(FORCE_CHANNEL, msg_text)
-                bot.send_message(FORCE_GROUP, msg_text)
-            except:
-                pass
+        user_id = req["user_id"]
+        bot.send_message(user_id, "❌ Your deposit request was rejected.")
+        msg_text = f"❌ Deposit rejected!\nUser: {user_id}\nAmount: {req['amount_bdt']} BDT\nTXID: {req['txid']}"
+        try:
+            bot.send_message(FORCE_CHANNEL, msg_text)
+            bot.send_message(FORCE_GROUP, msg_text)
+        except:
+            pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("approve_wd_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_wd_"))
 def approve_wd_cb(call):
-    req_id = call.data.split("_")[2]
-    if approve_withdraw(req_id):
+    req_id = call.data.split("_")[3]
+    success, req = approve_withdraw(req_id)
+    if success:
         bot.answer_callback_query(call.id, "Withdraw approved.")
         bot.edit_message_text("Withdraw approved.", call.message.chat.id, call.message.message_id)
-        wd = github_read("withdraw.json").get(req_id, {})
-        user_id = wd.get("user_id")
-        amount = wd.get("amount_usd")
-        if user_id and amount:
-            bot.send_message(user_id, f"✅ Your withdrawal of ${amount} has been approved and sent.")
-            msg_text = f"📢 Withdrawal approved!\nUser: {user_id}\nAmount: ${amount}\nMethod: {wd['method']}\nAccount: {wd['account']}"
-            try:
-                bot.send_message(FORCE_CHANNEL, msg_text)
-                bot.send_message(FORCE_GROUP, msg_text)
-            except:
-                pass
+        user_id = req["user_id"]
+        amount = req["amount_usd"]
+        bot.send_message(user_id, f"✅ Your withdrawal of ${amount} has been approved and sent.")
+        msg_text = f"📢 Withdrawal approved!\nUser: {user_id}\nAmount: ${amount}\nMethod: {req['method']}\nAccount: {req['account']}"
+        try:
+            bot.send_message(FORCE_CHANNEL, msg_text)
+            bot.send_message(FORCE_GROUP, msg_text)
+        except:
+            pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("reject_wd_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_wd_"))
 def reject_wd_cb(call):
-    req_id = call.data.split("_")[2]
-    if reject_withdraw(req_id):
+    req_id = call.data.split("_")[3]
+    success, req = reject_withdraw(req_id)
+    if success:
         bot.answer_callback_query(call.id, "Withdraw rejected.")
         bot.edit_message_text("Withdraw rejected.", call.message.chat.id, call.message.message_id)
-        wd = github_read("withdraw.json").get(req_id, {})
-        user_id = wd.get("user_id")
-        if user_id:
-            bot.send_message(user_id, "❌ Your withdrawal request was rejected.")
-            msg_text = f"❌ Withdrawal rejected!\nUser: {user_id}\nAmount: ${wd['amount_usd']}\nMethod: {wd['method']}"
-            try:
-                bot.send_message(FORCE_CHANNEL, msg_text)
-                bot.send_message(FORCE_GROUP, msg_text)
-            except:
-                pass
+        user_id = req["user_id"]
+        bot.send_message(user_id, "❌ Your withdrawal request was rejected.")
+        msg_text = f"❌ Withdrawal rejected!\nUser: {user_id}\nAmount: ${req['amount_usd']}\nMethod: {req['method']}"
+        try:
+            bot.send_message(FORCE_CHANNEL, msg_text)
+            bot.send_message(FORCE_GROUP, msg_text)
+        except:
+            pass
     else:
         bot.answer_callback_query(call.id, "Failed or already processed.")
 
