@@ -98,6 +98,13 @@
         "status": "completed",
         "details": "Invested in Basic",
         "timestamp": "2026-03-23T19:38:11.171964"
+      },
+      {
+        "type": "deposit",
+        "amount": 7.6923076923076925,
+        "status": "completed",
+        "details": "Deposit of 1000.0 BDT approved",
+        "timestamp": "2026-03-23T19:45:41.624681"
       }
     ],
     "banned": false
