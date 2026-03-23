@@ -14,5 +14,13 @@
     "account": "/start",
     "status": "pending",
     "timestamp": "2026-03-23T17:43:47.961286"
+  },
+  "6919025708_1774288067": {
+    "user_id": 6919025708,
+    "amount_usd": 5.0,
+    "method": "Rocket",
+    "account": "01707349407",
+    "status": "pending",
+    "timestamp": "2026-03-23T17:47:47.335214"
   }
 }
