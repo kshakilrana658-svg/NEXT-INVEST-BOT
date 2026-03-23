@@ -12,7 +12,7 @@
     "amount_usd": 5.0,
     "method": "Bkash",
     "account": "/start",
-    "status": "pending",
+    "status": "rejected",
     "timestamp": "2026-03-23T17:43:47.961286"
   },
   "6919025708_1774288067": {
