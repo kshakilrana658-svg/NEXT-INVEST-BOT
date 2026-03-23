@@ -84,6 +84,13 @@
         "status": "completed",
         "details": "Added by admin",
         "timestamp": "2026-03-23T18:29:40.140267"
+      },
+      {
+        "type": "admin_add",
+        "amount": 1e+59,
+        "status": "completed",
+        "details": "Added by admin",
+        "timestamp": "2026-03-23T18:30:57.327969"
       }
     ],
     "banned": false
