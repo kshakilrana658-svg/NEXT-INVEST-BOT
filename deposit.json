@@ -25,7 +25,7 @@
     "user_id": 6919025708,
     "amount_bdt": 1000.0,
     "txid": "Gdg",
-    "status": "pending",
+    "status": "approved",
     "timestamp": "2026-03-23T20:20:49.133254"
   }
 }
