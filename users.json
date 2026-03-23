@@ -77,6 +77,13 @@
         "status": "completed",
         "details": "Added by admin",
         "timestamp": "2026-03-23T18:29:17.937640"
+      },
+      {
+        "type": "admin_add",
+        "amount": 5e+20,
+        "status": "completed",
+        "details": "Added by admin",
+        "timestamp": "2026-03-23T18:29:40.140267"
       }
     ],
     "banned": false
