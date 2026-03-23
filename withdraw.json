@@ -20,7 +20,7 @@
     "amount_usd": 5.0,
     "method": "Rocket",
     "account": "01707349407",
-    "status": "pending",
+    "status": "rejected",
     "timestamp": "2026-03-23T17:47:47.335214"
   }
 }
