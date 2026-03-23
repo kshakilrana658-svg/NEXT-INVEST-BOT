@@ -28,7 +28,7 @@
     "amount_usd": 20.0,
     "method": "nagad",
     "account": "01487349407",
-    "status": "pending",
+    "status": "approved",
     "timestamp": "2026-03-23T21:38:11.243219"
   }
 }
