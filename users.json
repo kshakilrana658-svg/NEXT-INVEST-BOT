@@ -91,6 +91,13 @@
         "status": "completed",
         "details": "Added by admin",
         "timestamp": "2026-03-23T18:30:57.327969"
+      },
+      {
+        "type": "investment",
+        "amount": 10.0,
+        "status": "completed",
+        "details": "Invested in Basic",
+        "timestamp": "2026-03-23T19:38:11.171964"
       }
     ],
     "banned": false
