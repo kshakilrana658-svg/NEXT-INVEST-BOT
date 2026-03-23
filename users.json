@@ -23,6 +23,13 @@
         "status": "completed",
         "details": "Added by admin",
         "timestamp": "2026-03-23T17:32:26.769367"
+      },
+      {
+        "type": "deposit",
+        "amount": 7.6923076923076925,
+        "status": "completed",
+        "details": "Deposit of 1000.0 BDT approved",
+        "timestamp": "2026-03-23T20:21:16.332345"
       }
     ],
     "banned": false
