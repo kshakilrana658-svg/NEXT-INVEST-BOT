@@ -37,6 +37,13 @@
         "status": "completed",
         "details": "Deposit of 1000.0 BDT approved",
         "timestamp": "2026-03-23T21:33:30.641706"
+      },
+      {
+        "type": "withdraw",
+        "amount": 20.0,
+        "status": "completed",
+        "details": "Withdraw approved",
+        "timestamp": "2026-03-23T21:38:34.027920"
       }
     ],
     "banned": false
