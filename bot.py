@@ -72,6 +72,8 @@ if not settings:
         "daily_withdraw_limit": 1000,
         "min_deposit_usd": 5,
         "max_deposit_usd": 5000,
+        "min_deposit_bdt": 100,
+        "max_deposit_bdt": 50000,
         "support_contact": "dark_princes12"
     })
     logger.info("Default settings initialized.")
@@ -256,12 +258,14 @@ def check_daily_withdraw_limit(user_id, amount):
     return True, total_today
 
 # ---------- Deposit ----------
-def create_deposit_request(user_id, amount_usd, txid, method):
+def create_deposit_request(user_id, amount_usd, original_amount, original_unit, method, txid):
     request_id = f"{user_id}_{int(time.time())}"
     deposit = {
         "request_id": request_id,
         "user_id": user_id,
         "amount_usd": amount_usd,
+        "original_amount": original_amount,
+        "original_unit": original_unit,
         "txid": txid,
         "method": method,
         "status": "pending",
@@ -290,12 +294,13 @@ def reject_deposit(request_id, reason):
     return True, deposit
 
 # ---------- Withdraw ----------
-def create_withdraw_request(user_id, amount_usd, method, address):
+def create_withdraw_request(user_id, amount_usd, bdt_to_send, method, address):
     request_id = f"{user_id}_{int(time.time())}"
     withdraw = {
         "request_id": request_id,
         "user_id": user_id,
         "amount_usd": amount_usd,
+        "bdt_to_send": bdt_to_send,
         "method": method,
         "address": address,
         "status": "pending",
@@ -388,7 +393,7 @@ def ensure_joined(user_id, chat_id):
         return False
     return True
 
-# ======================= MAIN MENU =======================
+# ======================= MAIN MENU (USER) =======================
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
@@ -706,6 +711,8 @@ def process_deposit_amount(m):
         settings = get_settings()
         if method in ["bkash", "nagad", "rocket"]:
             # amount_input is in BDT
+            original_amount = amount_input
+            original_unit = "BDT"
             rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
             usd_amount = amount_input / rate
             min_deposit_bdt = settings.get("min_deposit_bdt", 100)
@@ -719,6 +726,8 @@ def process_deposit_amount(m):
             confirm_msg = f"✅ You sent <b>{amount_input} BDT</b> → will receive <b>${usd_amount:.2f} USD</b> (1 USD = {rate} BDT).\n\nConfirm?"
         else:
             # amount_input is in USD
+            original_amount = amount_input
+            original_unit = "USD"
             usd_amount = amount_input
             min_deposit = settings.get("min_deposit_usd", 5)
             max_deposit = settings.get("max_deposit_usd", 5000)
@@ -729,6 +738,8 @@ def process_deposit_amount(m):
                 bot.reply_to(m, f"❌ Maximum deposit amount is ${max_deposit}.")
                 return
             confirm_msg = f"✅ You are sending <b>${usd_amount}</b> via {method.upper()}.\n\nConfirm?"
+        bot.temp_deposit[user_id]["original_amount"] = original_amount
+        bot.temp_deposit[user_id]["original_unit"] = original_unit
         bot.temp_deposit[user_id]["amount_usd"] = usd_amount
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data="confirm_deposit"),
@@ -751,12 +762,14 @@ def confirm_deposit_cb(call):
     method = data.get("method")
     txid = data.get("txid")
     amount_usd = data.get("amount_usd")
-    if not method or not txid or not amount_usd:
+    original_amount = data.get("original_amount")
+    original_unit = data.get("original_unit")
+    if not method or not txid or not amount_usd or not original_amount or not original_unit:
         bot.answer_callback_query(call.id, "Missing data.")
         return
-    req_id = create_deposit_request(user_id, amount_usd, txid, method)
+    req_id = create_deposit_request(user_id, amount_usd, original_amount, original_unit, method, txid)
     bot.answer_callback_query(call.id, "✅ Deposit request submitted!")
-    bot.edit_message_text(f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>${amount_usd}</b>\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.upper()}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    bot.edit_message_text(f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>{original_amount} {original_unit}</b> → ${amount_usd:.2f}\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.upper()}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
     update_user_activity(user_id, "deposit_request")
     del bot.temp_deposit[user_id]
 
@@ -808,21 +821,26 @@ def process_withdraw_amount(m):
         if not within_limit:
             bot.reply_to(m, f"❌ Daily withdraw limit reached. You have already withdrawn ${total_today:.2f} USD today. Limit is ${settings.get('daily_withdraw_limit', 1000)}.")
             return
+        rate = settings.get("withdraw_rate", DEFAULT_WITHDRAW_RATE)
+        bdt_to_send = amount * rate - SERVICE_CHARGE_BDT
+        if bdt_to_send < 0:
+            bdt_to_send = 0
+        confirm_text = f"💸 You will receive approximately <b>{bdt_to_send:.2f} BDT</b> after charge.\n\nProceed?"
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Proceed", callback_data=f"confirm_withdraw|{amount}"),
+        markup.add(InlineKeyboardButton("✅ Proceed", callback_data=f"confirm_withdraw|{amount}|{bdt_to_send}"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_withdraw"))
-        bot.reply_to(m, f"💸 You requested <b>${amount}</b> USD. Proceed?", reply_markup=markup, parse_mode="HTML")
+        bot.reply_to(m, confirm_text, reply_markup=markup, parse_mode="HTML")
     except:
         bot.reply_to(m, "❌ Invalid amount. Use /start.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_withdraw|"))
 def confirm_withdraw_cb(call):
-    if not ensure_joined(call.from_user.id, call.message.chat.id):
-        return
-    amount = float(call.data.split("|")[1])
+    parts = call.data.split("|")
+    amount = float(parts[1])
+    bdt_to_send = float(parts[2])
     if not hasattr(bot, 'temp_withdraw'):
         bot.temp_withdraw = {}
-    bot.temp_withdraw[call.from_user.id] = {"amount": amount}
+    bot.temp_withdraw[call.from_user.id] = {"amount": amount, "bdt_to_send": bdt_to_send}
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton("💳 Bkash", callback_data="wd_method|bkash"),
                InlineKeyboardButton("💳 Nagad", callback_data="wd_method|nagad"),
@@ -861,8 +879,9 @@ def process_withdraw_account(m):
         bot.reply_to(m, "❌ Session expired. Please start withdrawal again.")
         return
     amount = temp["amount"]
+    bdt_to_send = temp["bdt_to_send"]
     method = temp["method"]
-    req_id = create_withdraw_request(user_id, amount, method, account)
+    req_id = create_withdraw_request(user_id, amount, bdt_to_send, method, account)
     bot.reply_to(m, f"✅ <b>Withdrawal request submitted!</b>\n\n💰 Amount: ${amount}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will process it.</b>", parse_mode="HTML")
     update_user_activity(user_id, "withdraw_request")
     del bot.temp_withdraw[user_id]
@@ -927,7 +946,7 @@ def referral_btn(m):
     bot.reply_to(m, text, reply_markup=markup, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_referral")
 
-# ------------------- NEW: My Stats & Leaderboard -------------------
+# ------------------- MY STATS & LEADERBOARD -------------------
 @bot.message_handler(func=lambda m: m.text == "📊 My Stats")
 def my_stats_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
@@ -976,8 +995,7 @@ def leaderboard_btn(m):
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_leaderboard")
 
-# ------------------- End New -------------------
-
+# ------------------- PROFILE & SUPPORT -------------------
 @bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
@@ -1101,8 +1119,12 @@ def admin_deposits(m):
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
                        InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
+            if dep["original_unit"] == "BDT":
+                amount_display = f"{dep['original_amount']} BDT (≈ ${dep['amount_usd']:.2f} USD)"
+            else:
+                amount_display = f"${dep['original_amount']} USD"
             bot.send_message(m.chat.id,
-                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>${dep['amount_usd']}</b>\n🔑 TXID: <code>{dep['txid']}</code>\n💳 Method: {dep.get('method', 'N/A').upper()}",
+                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>{amount_display}</b>\n🔑 TXID: <code>{dep['txid']}</code>\n💳 Method: {dep.get('method', 'N/A').upper()}",
                              reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and is_admin(m.from_user.id))
@@ -1124,7 +1146,7 @@ def admin_withdraws(m):
             markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
                        InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
             bot.send_message(m.chat.id,
-                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method'].upper()}\n📞 Address: <code>{wd['address']}</code>",
+                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']} USD → BDT to send: {wd['bdt_to_send']:.2f} BDT</b>\n💳 Method: {wd['method'].upper()}\n📞 Address: <code>{wd['address']}</code>",
                              reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats" and is_admin(m.from_user.id))
@@ -1549,8 +1571,8 @@ def set_support_contact(m):
     bot.reply_to(m, f"✅ Support contact updated to @{new_contact}.", parse_mode="HTML")
     logger.info(f"Support contact changed to {new_contact} by admin {m.from_user.id}")
 
-# ------------------- Enhanced Group Messages -------------------
-def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, address=None):
+# ------------------- ENHANCED GROUP MESSAGES -------------------
+def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, address=None, bdt_to_send=None):
     user = get_user(user_id)
     user_name = user.get("first_name", "User") if user else f"User {user_id}"
     user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
@@ -1590,7 +1612,8 @@ def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, met
                 f"Your withdrawal request has been approved and processed.\n\n"
                 f"💰 <b>Amount:</b> ${amount}\n"
                 f"💳 <b>Method:</b> {method.upper()}\n"
-                f"📞 <b>Address:</b> <code>{masked_address}</code>\n\n"
+                f"📞 <b>Address:</b> <code>{masked_address}</code>\n"
+                f"💸 <b>BDT Sent:</b> {bdt_to_send:.2f} BDT\n\n"
                 f"Thank you for using NextInvest! 🚀"
             )
         else:  # reject
@@ -1761,7 +1784,7 @@ def approve_wd_cb(call):
         bot.answer_callback_query(call.id, "✅ Withdraw approved!")
         bot.edit_message_text("✅ Withdraw approved.", call.message.chat.id, call.message.message_id)
         bot.send_message(wd["user_id"], f"✅ Your withdrawal of ${wd['amount_usd']} has been approved and sent.")
-        msg_text = format_auto_post("approve", "withdraw", wd["user_id"], wd["amount_usd"], method=wd["method"], address=wd["address"])
+        msg_text = format_auto_post("approve", "withdraw", wd["user_id"], wd["amount_usd"], method=wd["method"], address=wd["address"], bdt_to_send=wd["bdt_to_send"])
         try:
             bot.send_message(FORCE_CHANNEL, msg_text, parse_mode="HTML")
             bot.send_message(FORCE_GROUP, msg_text, parse_mode="HTML")
