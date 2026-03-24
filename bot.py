@@ -70,8 +70,8 @@ if not settings:
         "min_withdraw_usd": 5,
         "max_withdraw_usd": 500,
         "daily_withdraw_limit": 1000,
-        "min_deposit_bdt": 100,
-        "max_deposit_bdt": 50000,
+        "min_deposit_usd": 5,
+        "max_deposit_usd": 5000,
     })
     logger.info("Default settings initialized.")
 
@@ -229,7 +229,6 @@ def get_user_name(user_id):
     return name
 
 def mask_string(s, visible=4):
-    """Return a masked version of a string showing only last `visible` characters."""
     if not s:
         return "****"
     if len(s) <= visible:
@@ -272,7 +271,6 @@ def approve_deposit(request_id):
     deposit = deposits_col.find_one({"request_id": request_id, "status": "pending"})
     if not deposit:
         return False, None
-    # deposit already has amount_usd, just add to balance
     users_col.update_one({"user_id": deposit["user_id"]}, {"$inc": {"balance": deposit["amount_usd"]}})
     add_transaction(deposit["user_id"], "deposit", deposit["amount_usd"], "completed", f"Deposit of ${deposit['amount_usd']} USD approved")
     deposits_col.update_one({"request_id": request_id}, {"$set": {"status": "approved"}})
@@ -375,7 +373,6 @@ def is_joined(user_id):
         return False
 
 def ensure_joined(user_id, chat_id):
-    """Check if user is still joined; if not, send join prompt and return False."""
     if not is_joined(user_id):
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_CHANNEL[1:]}"))
@@ -409,10 +406,10 @@ def welcome_message(first_name):
         f"   ✅ Fast Withdrawals\n\n"
         f"💡 <b>How to Start:</b>\n"
         f"   1️⃣ Click <b>💳 Deposit Money</b> below\n"
-        f"   2️⃣ Choose payment method (Bkash/Nagad/Rocket or Crypto)\n"
+        f"   2️⃣ Choose payment method\n"
         f"   3️⃣ Send funds to the provided address/number\n"
         f"   4️⃣ Enter TXID and amount in USD\n"
-        f"   5️⃣ Confirm your deposit with the button\n"
+        f"   5️⃣ Confirm your deposit\n"
         f"   6️⃣ Admin approves → Balance added\n"
         f"   7️⃣ Click <b>🚀 Invest Now</b> to grow your capital\n\n"
         f"🎁 <b>Welcome Bonus:</b> $0.05 instantly!\n\n"
@@ -589,13 +586,10 @@ def deposit_btn(m):
     if not settings.get("deposit_enabled", True):
         bot.reply_to(m, "❌ Deposit is currently disabled by admin.")
         return
-    # Inline buttons for all methods (fiat + crypto)
     markup = InlineKeyboardMarkup(row_width=2)
-    # Fiat
     markup.add(InlineKeyboardButton("💳 Bkash", callback_data="deposit_method|bkash"),
                InlineKeyboardButton("💳 Nagad", callback_data="deposit_method|nagad"),
                InlineKeyboardButton("💳 Rocket", callback_data="deposit_method|rocket"))
-    # Crypto
     markup.add(InlineKeyboardButton("🪙 TRC20", callback_data="deposit_method|trc20"),
                InlineKeyboardButton("🪙 ERC20", callback_data="deposit_method|erc20"),
                InlineKeyboardButton("🪙 BEP20", callback_data="deposit_method|bep20"),
@@ -613,8 +607,42 @@ def deposit_method_cb(call):
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[call.from_user.id] = {"method": method}
-    msg = bot.send_message(call.message.chat.id, f"📱 <b>Send funds to {method.upper()}:</b>\n<code>{address}</code>\n\nAfter sending, <b>enter the TXID</b>:", parse_mode="HTML")
+
+    if method in ["bkash", "nagad", "rocket"]:
+        rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
+        msg_text = (
+            f"📱 <b>{method.capitalize()} Deposit</b>\n\n"
+            f"💸 Send money to this number:\n<code>{address}</code>\n\n"
+            f"💱 <b>Exchange Rate:</b> 1 USD = {rate} BDT\n\n"
+            f"⏳ After sending, <b>enter the TXID</b> and then <b>the amount in USD</b> you want to deposit.\n\n"
+            f"🔁 <i>Want to choose another method?</i>"
+        )
+    else:
+        msg_text = (
+            f"🪙 <b>{method.upper()} Deposit</b>\n\n"
+            f"📬 Send funds to this address:\n<code>{address}</code>\n\n"
+            f"⏳ After sending, <b>enter the TXID</b> and then <b>the amount in USD</b> you want to deposit.\n\n"
+            f"🔁 <i>Want to choose another method?</i>"
+        )
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔁 Back to methods", callback_data="back_to_deposit_methods"))
+    msg = bot.send_message(call.message.chat.id, msg_text, reply_markup=markup, parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_txid)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_deposit_methods")
+def back_to_deposit_methods_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton("💳 Bkash", callback_data="deposit_method|bkash"),
+               InlineKeyboardButton("💳 Nagad", callback_data="deposit_method|nagad"),
+               InlineKeyboardButton("💳 Rocket", callback_data="deposit_method|rocket"))
+    markup.add(InlineKeyboardButton("🪙 TRC20", callback_data="deposit_method|trc20"),
+               InlineKeyboardButton("🪙 ERC20", callback_data="deposit_method|erc20"),
+               InlineKeyboardButton("🪙 BEP20", callback_data="deposit_method|bep20"),
+               InlineKeyboardButton("🪙 BTC", callback_data="deposit_method|btc"))
+    bot.edit_message_text("📱 <b>Select payment method:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     bot.answer_callback_query(call.id)
 
 def process_deposit_txid(m):
@@ -643,9 +671,8 @@ def process_deposit_amount(m):
         if user_id not in bot.temp_deposit:
             bot.reply_to(m, "❌ Session expired. Please start deposit again.")
             return
-        # No min/max for crypto? We'll use same as before or remove limits for crypto. For simplicity, keep USD limits.
         settings = get_settings()
-        min_deposit = settings.get("min_deposit_usd", 5)  # add new setting
+        min_deposit = settings.get("min_deposit_usd", 5)
         max_deposit = settings.get("max_deposit_usd", 5000)
         if amount_usd < min_deposit:
             bot.reply_to(m, f"❌ Minimum deposit amount is ${min_deposit}.")
@@ -747,13 +774,10 @@ def confirm_withdraw_cb(call):
     if not hasattr(bot, 'temp_withdraw'):
         bot.temp_withdraw = {}
     bot.temp_withdraw[call.from_user.id] = {"amount": amount}
-    # Inline buttons for withdrawal methods (fiat + crypto)
     markup = InlineKeyboardMarkup(row_width=2)
-    # Fiat
     markup.add(InlineKeyboardButton("💳 Bkash", callback_data="wd_method|bkash"),
                InlineKeyboardButton("💳 Nagad", callback_data="wd_method|nagad"),
                InlineKeyboardButton("💳 Rocket", callback_data="wd_method|rocket"))
-    # Crypto
     markup.add(InlineKeyboardButton("🪙 TRC20", callback_data="wd_method|trc20"),
                InlineKeyboardButton("🪙 ERC20", callback_data="wd_method|erc20"),
                InlineKeyboardButton("🪙 BEP20", callback_data="wd_method|bep20"),
@@ -768,9 +792,10 @@ def withdraw_method_cb(call):
     method = call.data.split("|")[1]
     bot.temp_withdraw[call.from_user.id]["method"] = method
     if method in ["bkash", "nagad", "rocket"]:
-        msg = bot.send_message(call.message.chat.id, f"📞 <b>Enter your {method.capitalize()} account number:</b>", parse_mode="HTML")
+        msg_text = f"📞 <b>Enter your {method.capitalize()} account number:</b>"
     else:
-        msg = bot.send_message(call.message.chat.id, f"🪙 <b>Enter your {method.upper()} wallet address:</b>", parse_mode="HTML")
+        msg_text = f"🪙 <b>Enter your {method.upper()} wallet address:</b>"
+    msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, process_withdraw_account)
     bot.answer_callback_query(call.id)
 
@@ -902,7 +927,7 @@ def admin_menu():
         "💸 Referral Control", "⚙ System Settings",
         "💱 Set Deposit Rate", "💱 Set Withdraw Rate",
         "📞 Set Deposit Numbers", "🔙 User Menu",
-        "🪙 Set Crypto Addresses"   # New button
+        "🪙 Set Crypto Addresses"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
@@ -974,7 +999,7 @@ def admin_deposits(m):
             markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
                        InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
             bot.send_message(m.chat.id,
-                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>${dep['amount_usd']}</b>\n🔑 TXID: <code>{mask_string(dep['txid'])}</code>\n💳 Method: {dep.get('method', 'N/A').upper()}",
+                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>${dep['amount_usd']}</b>\n🔑 TXID: <code>{dep['txid']}</code>\n💳 Method: {dep.get('method', 'N/A').upper()}",
                              reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and is_admin(m.from_user.id))
@@ -996,7 +1021,7 @@ def admin_withdraws(m):
             markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
                        InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
             bot.send_message(m.chat.id,
-                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method'].upper()}\n📞 Address: <code>{mask_string(wd['address'])}</code>",
+                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method'].upper()}\n📞 Address: <code>{wd['address']}</code>",
                              reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats" and is_admin(m.from_user.id))
@@ -1391,38 +1416,66 @@ def process_deposit_numbers(m):
 
 @bot.message_handler(func=lambda m: m.text == "🪙 Set Crypto Addresses" and is_admin(m.from_user.id))
 def admin_set_crypto_addresses(m):
-    # Same as Set Deposit Numbers, but we can call the same function
     admin_set_deposit_numbers(m)
 
-# ------------------- Admin Approval Callbacks (with masked data & beautiful group messages) -------------------
+# ------------------- Enhanced Group Messages -------------------
 def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, address=None):
-    """Format the auto-post message for channel/group with masked sensitive data."""
-    user_name = get_user_name(user_id)
+    user = get_user(user_id)
+    user_name = user.get("first_name", "User") if user else f"User {user_id}"
+    user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
+    masked_txid = mask_string(txid) if txid else ""
+    masked_address = mask_string(address) if address else ""
+
     if type_ == "deposit":
         if action == "approve":
             emoji = "✅"
-            title = "Deposit Approved"
-            details = f"💰 Amount: <b>${amount}</b>\n🔑 TXID: <code>{mask_string(txid)}</code>\n💳 Method: {method.upper()}"
+            title = "DEPOSIT APPROVED"
+            details = (
+                f"🎉 <b>Congratulations {user_link}!</b> 🎉\n\n"
+                f"Your deposit has been successfully approved and credited to your account.\n\n"
+                f"💰 <b>Amount:</b> ${amount}\n"
+                f"💳 <b>Method:</b> {method.upper()}\n"
+                f"🔑 <b>TXID:</b> <code>{masked_txid}</code>\n\n"
+                f"Thank you for choosing NextInvest! 🚀"
+            )
         else:  # reject
             emoji = "❌"
-            title = "Deposit Rejected"
-            details = f"💰 Amount: <b>${amount}</b>\n🔑 TXID: <code>{mask_string(txid)}</code>\n💳 Method: {method.upper()}"
-            if reason:
-                details += f"\n💬 <b>Reason:</b> {reason}"
+            title = "DEPOSIT REJECTED"
+            details = (
+                f"Dear {user_link},\n\n"
+                f"Your deposit request was rejected.\n\n"
+                f"💰 <b>Amount:</b> ${amount}\n"
+                f"💳 <b>Method:</b> {method.upper()}\n"
+                f"🔑 <b>TXID:</b> <code>{masked_txid}</code>\n"
+                f"💬 <b>Reason:</b> {reason}\n\n"
+                f"If you have any questions, please contact support."
+            )
     else:  # withdraw
         if action == "approve":
             emoji = "✅"
-            title = "Withdrawal Approved"
-            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.upper()}\n📞 Address: <code>{mask_string(address)}</code>"
+            title = "WITHDRAWAL APPROVED"
+            details = (
+                f"🎉 <b>Congratulations {user_link}!</b> 🎉\n\n"
+                f"Your withdrawal request has been approved and processed.\n\n"
+                f"💰 <b>Amount:</b> ${amount}\n"
+                f"💳 <b>Method:</b> {method.upper()}\n"
+                f"📞 <b>Address:</b> <code>{masked_address}</code>\n\n"
+                f"Thank you for using NextInvest! 🚀"
+            )
         else:  # reject
             emoji = "❌"
-            title = "Withdrawal Rejected"
-            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.upper()}\n📞 Address: <code>{mask_string(address)}</code>"
-            if reason:
-                details += f"\n💬 <b>Reason:</b> {reason}"
+            title = "WITHDRAWAL REJECTED"
+            details = (
+                f"Dear {user_link},\n\n"
+                f"Your withdrawal request was rejected.\n\n"
+                f"💰 <b>Amount:</b> ${amount}\n"
+                f"💳 <b>Method:</b> {method.upper()}\n"
+                f"📞 <b>Address:</b> <code>{masked_address}</code>\n"
+                f"💬 <b>Reason:</b> {reason}\n\n"
+                f"If you have any questions, please contact support."
+            )
     return (
         f"{emoji} <b>{title}</b> {emoji}\n\n"
-        f"👤 <b>User:</b> {user_name} (<code>{user_id}</code>)\n"
         f"{details}\n\n"
         f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
     )
@@ -1449,7 +1502,7 @@ def reject_reason_cb(call):
         bot.answer_callback_query(call.id, "Not admin")
         return
     parts = call.data.split("|")
-    type_ = parts[0].split("_")[2]  # deposit or withdraw
+    type_ = parts[0].split("_")[2]
     request_id = parts[1]
     reason = parts[2]
     if reason == "custom":
