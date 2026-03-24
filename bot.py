@@ -72,6 +72,7 @@ if not settings:
         "daily_withdraw_limit": 1000,
         "min_deposit_usd": 5,
         "max_deposit_usd": 5000,
+        "support_contact": "dark_princes12"   # Admin can change this
     })
     logger.info("Default settings initialized.")
 
@@ -235,6 +236,12 @@ def mask_string(s, visible=4):
         return s
     return "*" * (len(s) - visible) + s[-visible:]
 
+def mask_number(number):
+    """Mask a phone number like 013*****182"""
+    if not number or len(number) < 7:
+        return "*******"
+    return number[:3] + "*****" + number[-3:]
+
 def check_daily_withdraw_limit(user_id, amount):
     settings = get_settings()
     daily_limit = settings.get("daily_withdraw_limit", 1000)
@@ -386,11 +393,11 @@ def ensure_joined(user_id, chat_id):
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
-        "📊 Investment Plans", "🚀 Invest Now",
-        "💰 My Wallet", "💳 Deposit Money",
-        "💵 Withdraw Money", "📈 My Investments",
-        "💸 Profit History", "🤝 Referral Program",
-        "👤 My Profile", "📩 Support & Help"
+        "📈 Investment Plans", "💰 Invest Now",
+        "💳 My Wallet", "💸 Deposit Money",
+        "💵 Withdraw Money", "📊 My Investments",
+        "🏆 Profit History", "🤝 Referral Program",
+        "👤 My Profile", "📞 Support & Help"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
@@ -399,19 +406,20 @@ def welcome_message(first_name):
     return (
         f"🌟 <b>Welcome to NextInvest Bot, {first_name}!</b> 🌟\n\n"
         f"🎉 <b>Your Premium Investment Partner</b> 🎉\n\n"
-        f"🔹 <b>Features:</b>\n"
-        f"   ✅ Deposit Crypto / Fiat → Get USD Balance\n"
-        f"   ✅ Invest & Earn Daily Profit\n"
-        f"   ✅ Refer Friends & Earn Bonus\n"
-        f"   ✅ Fast Withdrawals\n\n"
-        f"💡 <b>How to Start:</b>\n"
-        f"   1️⃣ Click <b>💳 Deposit Money</b> below\n"
-        f"   2️⃣ Choose payment method\n"
-        f"   3️⃣ Send funds to the provided address/number\n"
-        f"   4️⃣ Enter TXID and amount in USD\n"
+        f"🔹 <b>What you can do:</b>\n"
+        f"   ✅ Deposit BDT / Crypto → Get USD balance\n"
+        f"   ✅ Invest in high‑profit plans\n"
+        f"   ✅ Earn daily profits automatically\n"
+        f"   ✅ Refer friends and earn bonuses\n"
+        f"   ✅ Withdraw your earnings anytime\n\n"
+        f"📘 <b>How to get started:</b>\n"
+        f"   1️⃣ Click <b>💸 Deposit Money</b> below\n"
+        f"   2️⃣ Choose your preferred payment method\n"
+        f"   3️⃣ Send the exact amount to the provided address/number\n"
+        f"   4️⃣ Enter the transaction ID (TXID) and the amount in USD\n"
         f"   5️⃣ Confirm your deposit\n"
-        f"   6️⃣ Admin approves → Balance added\n"
-        f"   7️⃣ Click <b>🚀 Invest Now</b> to grow your capital\n\n"
+        f"   6️⃣ Admin will verify and credit your balance\n"
+        f"   7️⃣ Once credited, click <b>💰 Invest Now</b> to start earning\n\n"
         f"🎁 <b>Welcome Bonus:</b> $0.05 instantly!\n\n"
         f"👇 <b>Use the buttons below to begin</b> 👇"
     )
@@ -458,7 +466,7 @@ def verify_cb(call):
         bot.answer_callback_query(call.id, "Still not joined. Please join both.")
 
 # ------------------- MAIN BUTTON HANDLERS -------------------
-@bot.message_handler(func=lambda m: m.text == "📊 Investment Plans")
+@bot.message_handler(func=lambda m: m.text == "📈 Investment Plans")
 def plans_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
@@ -475,7 +483,7 @@ def plans_btn(m):
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_plans")
 
-@bot.message_handler(func=lambda m: m.text == "🚀 Invest Now")
+@bot.message_handler(func=lambda m: m.text == "💰 Invest Now")
 def invest_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
@@ -505,7 +513,7 @@ def select_plan_cb(call):
     if not hasattr(bot, 'temp_invest'):
         bot.temp_invest = {}
     bot.temp_invest[call.from_user.id] = {"plan_id": plan_id, "plan_name": plan["name"], "min_amount": plan["min_amount"]}
-    msg = bot.send_message(call.message.chat.id, f"🚀 You selected <b>{plan['name']}</b>.\n\nMinimum investment: <b>${plan['min_amount']}</b>\n\n💰 <b>Enter the amount you want to invest (in USD):</b>", parse_mode="HTML")
+    msg = bot.send_message(call.message.chat.id, f"🚀 You selected <b>{plan['name']}</b>.\n\nMinimum investment: <b>${plan['min_amount']}</b>\n\n💰 <b>Enter the amount you want to invest (in USD):</b>\n\n<i>Example: 100</i>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_invest_amount)
     bot.answer_callback_query(call.id)
 
@@ -526,12 +534,12 @@ def process_invest_amount(m):
             return
         user = get_user(user_id)
         if user["balance"] < amount:
-            bot.reply_to(m, "❌ Insufficient balance.")
+            bot.reply_to(m, "❌ Insufficient balance. Your current balance: ${:.2f}".format(user["balance"]))
             return
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_invest|{plan_id}|{amount}"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_invest"))
-        bot.reply_to(m, f"✅ You are about to invest <b>${amount}</b> in <b>{temp['plan_name']}</b>.\n\nConfirm?", reply_markup=markup, parse_mode="HTML")
+        bot.reply_to(m, f"✅ You are about to invest <b>${amount}</b> in <b>{temp['plan_name']}</b>.\n\n📝 Please confirm:", reply_markup=markup, parse_mode="HTML")
     except:
         bot.reply_to(m, "❌ Invalid amount. Please enter a number.")
 
@@ -562,7 +570,7 @@ def cancel_invest_cb(call):
     if call.from_user.id in bot.temp_invest:
         del bot.temp_invest[call.from_user.id]
 
-@bot.message_handler(func=lambda m: m.text == "💰 My Wallet")
+@bot.message_handler(func=lambda m: m.text == "💳 My Wallet")
 def wallet_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
@@ -572,13 +580,13 @@ def wallet_btn(m):
         return
     bal = user.get("balance", 0.0)
     transactions = user.get("transactions", [])[-5:]
-    text = f"💰 <b>My Wallet</b>\n\n<b>Balance:</b> ${bal:.2f}\n\n<b>📜 Last 5 Transactions:</b>\n"
+    text = f"💰 <b>My Wallet</b>\n\n<b>💰 Balance:</b> ${bal:.2f}\n\n<b>📜 Last 5 Transactions:</b>\n"
     for t in transactions[::-1]:
         text += f"   • {t['type']}: ${t['amount']} ({t['status']})\n"
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_wallet")
 
-@bot.message_handler(func=lambda m: m.text == "💳 Deposit Money")
+@bot.message_handler(func=lambda m: m.text == "💸 Deposit Money")
 def deposit_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
@@ -603,30 +611,50 @@ def deposit_method_cb(call):
     method = call.data.split("|")[1]
     settings = get_settings()
     numbers = settings.get("deposit_numbers", {})
-    address = numbers.get(method, "Not set")
+    real_number = numbers.get(method, "Not set")
+    # Mask the number for user display
+    if method in ["bkash", "nagad", "rocket"]:
+        masked = mask_number(real_number)
+    else:
+        masked = mask_string(real_number, 6)  # show last 6 for crypto addresses
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
-    bot.temp_deposit[call.from_user.id] = {"method": method}
+    bot.temp_deposit[call.from_user.id] = {"method": method, "real_number": real_number}
 
     if method in ["bkash", "nagad", "rocket"]:
         rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
         msg_text = (
             f"📱 <b>{method.capitalize()} Deposit</b>\n\n"
-            f"💸 Send money to this number:\n<code>{address}</code>\n\n"
+            f"💸 Send money to this number:\n<code>{masked}</code>\n\n"
             f"💱 <b>Exchange Rate:</b> 1 USD = {rate} BDT\n\n"
-            f"⏳ After sending, <b>enter the TXID</b> and then <b>the amount in USD</b> you want to deposit.\n\n"
-            f"🔁 <i>Want to choose another method?</i>"
+            f"📝 <b>Steps:</b>\n"
+            f"   1️⃣ Send the exact amount (in BDT) to the number above.\n"
+            f"   2️⃣ After sending, tap <b>✅ Confirm</b>.\n"
+            f"   3️⃣ You will be asked for the <b>TXID</b> and the <b>amount in USD</b>.\n\n"
+            f"🔁 <i>Need to choose another method?</i>"
         )
     else:
         msg_text = (
             f"🪙 <b>{method.upper()} Deposit</b>\n\n"
-            f"📬 Send funds to this address:\n<code>{address}</code>\n\n"
-            f"⏳ After sending, <b>enter the TXID</b> and then <b>the amount in USD</b> you want to deposit.\n\n"
-            f"🔁 <i>Want to choose another method?</i>"
+            f"📬 Send funds to this address:\n<code>{masked}</code>\n\n"
+            f"📝 <b>Steps:</b>\n"
+            f"   1️⃣ Send the exact amount (in USD equivalent) to the address above.\n"
+            f"   2️⃣ After sending, tap <b>✅ Confirm</b>.\n"
+            f"   3️⃣ You will be asked for the <b>TXID</b> and the <b>amount in USD</b>.\n\n"
+            f"🔁 <i>Need to choose another method?</i>"
         )
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔁 Back to methods", callback_data="back_to_deposit_methods"))
-    msg = bot.send_message(call.message.chat.id, msg_text, reply_markup=markup, parse_mode="HTML")
+    markup.add(InlineKeyboardButton("✅ Confirm", callback_data="confirm_deposit_details"),
+               InlineKeyboardButton("🔁 Back to methods", callback_data="back_to_deposit_methods"))
+    bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "confirm_deposit_details")
+def confirm_deposit_details_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
+    # Now ask for TXID
+    msg = bot.send_message(call.message.chat.id, "🔑 <b>Enter the transaction ID (TXID) of your payment:</b>\n\n<i>Example: 8A1B2C3D4E5F</i>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_txid)
     bot.answer_callback_query(call.id)
 
@@ -657,7 +685,7 @@ def process_deposit_txid(m):
         bot.reply_to(m, "❌ Session expired. Please start deposit again.")
         return
     bot.temp_deposit[user_id]["txid"] = txid
-    bot.reply_to(m, "💸 <b>Enter the amount in USD you sent:</b>\n(You'll receive the same amount in USD balance)", parse_mode="HTML")
+    bot.reply_to(m, "💸 <b>Enter the amount in USD you sent:</b>\n\n<i>Example: 100</i>\n(You'll receive the same amount in USD balance)", parse_mode="HTML")
     bot.register_next_step_handler(m, process_deposit_amount)
 
 def process_deposit_amount(m):
@@ -681,10 +709,11 @@ def process_deposit_amount(m):
             bot.reply_to(m, f"❌ Maximum deposit amount is ${max_deposit}.")
             return
         bot.temp_deposit[user_id]["amount_usd"] = amount_usd
+        method = bot.temp_deposit[user_id]["method"]
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data="confirm_deposit"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_deposit"))
-        bot.reply_to(m, f"✅ You sent <b>${amount_usd}</b> via {bot.temp_deposit[user_id]['method'].upper()}.\n\nConfirm?", reply_markup=markup, parse_mode="HTML")
+        bot.reply_to(m, f"✅ You are sending <b>${amount_usd}</b> via {method.upper()}.\n\n📝 Please confirm your deposit details:", reply_markup=markup, parse_mode="HTML")
     except:
         bot.reply_to(m, "❌ Invalid amount. Please start deposit again.")
         if user_id in bot.temp_deposit:
@@ -707,7 +736,7 @@ def confirm_deposit_cb(call):
         return
     req_id = create_deposit_request(user_id, amount_usd, txid, method)
     bot.answer_callback_query(call.id, "✅ Deposit request submitted!")
-    bot.edit_message_text(f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>${amount_usd}</b>\n🔑 TXID: <code>{txid}</code>\n🆔 Method: {method.upper()}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    bot.edit_message_text(f"✅ <b>Deposit request submitted!</b>\n\n💰 Amount: <b>${amount_usd}</b>\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.upper()}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will review it shortly.</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
     update_user_activity(user_id, "deposit_request")
     del bot.temp_deposit[user_id]
 
@@ -734,7 +763,7 @@ def withdraw_btn(m):
     info = (f"💱 <b>Withdraw Rate:</b> 1 USD = {rate} BDT (for fiat)\n"
             f"💰 <b>Service Charge:</b> {SERVICE_CHARGE_BDT} BDT per withdrawal (only for fiat)\n"
             f"📏 <b>Limits:</b> ${min_withdraw} - ${max_withdraw} USD per request\n")
-    msg = bot.reply_to(m, info + "💸 <b>Enter amount in USD:</b>", parse_mode="HTML")
+    msg = bot.reply_to(m, info + "💸 <b>Enter amount in USD:</b>\n\n<i>Example: 50</i>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_withdraw_amount)
 
 def process_withdraw_amount(m):
@@ -753,7 +782,7 @@ def process_withdraw_amount(m):
             return
         user = get_user(m.from_user.id)
         if user["balance"] < amount:
-            bot.reply_to(m, "❌ Insufficient balance.")
+            bot.reply_to(m, f"❌ Insufficient balance. Your current balance: ${user['balance']:.2f}.")
             return
         within_limit, total_today = check_daily_withdraw_limit(m.from_user.id, amount)
         if not within_limit:
@@ -792,9 +821,9 @@ def withdraw_method_cb(call):
     method = call.data.split("|")[1]
     bot.temp_withdraw[call.from_user.id]["method"] = method
     if method in ["bkash", "nagad", "rocket"]:
-        msg_text = f"📞 <b>Enter your {method.capitalize()} account number:</b>"
+        msg_text = f"📞 <b>Enter your {method.capitalize()} account number:</b>\n\n<i>Example: 01XXXXXXXXX</i>"
     else:
-        msg_text = f"🪙 <b>Enter your {method.upper()} wallet address:</b>"
+        msg_text = f"🪙 <b>Enter your {method.upper()} wallet address:</b>\n\n<i>Example: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</i>"
     msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, process_withdraw_account)
     bot.answer_callback_query(call.id)
@@ -827,7 +856,7 @@ def cancel_withdraw_cb(call):
     if call.from_user.id in bot.temp_withdraw:
         del bot.temp_withdraw[call.from_user.id]
 
-@bot.message_handler(func=lambda m: m.text == "📈 My Investments")
+@bot.message_handler(func=lambda m: m.text == "📊 My Investments")
 def my_investments_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
@@ -847,7 +876,7 @@ def my_investments_btn(m):
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_investments")
 
-@bot.message_handler(func=lambda m: m.text == "💸 Profit History")
+@bot.message_handler(func=lambda m: m.text == "🏆 Profit History")
 def profit_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
@@ -856,7 +885,7 @@ def profit_btn(m):
     if not profits:
         bot.reply_to(m, "📭 No profit history found.")
         return
-    text = "💸 <b>Profit History</b>\n\n"
+    text = "🏆 <b>Profit History</b>\n\n"
     for p in profits[-5:]:
         text += f"   • ${p['amount']} on {p['timestamp'].strftime('%Y-%m-%d')}\n"
     bot.reply_to(m, text, parse_mode="HTML")
@@ -872,7 +901,7 @@ def referral_btn(m):
     referrals = user.get("referrals", [])
     settings = get_settings()
     bonus = settings.get("referral_bonus", 0.01)
-    text = f"🔗 <b>Your Referral Link</b>\n\n<code>{ref_link}</code>\n\n👥 <b>Total referrals:</b> {len(referrals)}\n💰 <b>Earn ${bonus} per referral!</b>"
+    text = f"🔗 <b>Your Referral Link</b>\n\n<code>{ref_link}</code>\n\n👥 <b>Total referrals:</b> {len(referrals)}\n💰 <b>Earn ${bonus} per referral!</b>\n\n📤 <b>Share this link with your friends and earn rewards!</b>"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📤 Share Link", switch_inline_query=ref_link))
     bot.reply_to(m, text, reply_markup=markup, parse_mode="HTML")
@@ -901,17 +930,20 @@ def profile_btn(m):
     text += f"📥 <b>Total Deposit:</b> ${total_deposit:.2f}\n"
     text += f"📤 <b>Total Withdraw:</b> ${total_withdraw:.2f}\n"
     text += f"💸 <b>Total Invested:</b> ${total_invested:.2f}\n"
-    text += f"📈 <b>Total Profit:</b> ${total_profit:.2f}\n"
+    text += f"🏆 <b>Total Profit:</b> ${total_profit:.2f}\n"
     text += f"👥 <b>Referrals:</b> {len(referrals)}\n"
     text += f"📅 <b>Joined:</b> {user.get('joined', datetime.utcnow()).strftime('%Y-%m-%d')}"
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_profile")
 
-@bot.message_handler(func=lambda m: m.text == "📩 Support & Help")
+@bot.message_handler(func=lambda m: m.text == "📞 Support & Help")
 def support_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
-    bot.reply_to(m, "📩 <b>Support & Help</b>\n\nFor any assistance, please contact:\n👑 Owner: @dark_princes12\n📢 Channel: " + FORCE_CHANNEL + "\n👥 Group: " + FORCE_GROUP, parse_mode="HTML")
+    settings = get_settings()
+    contact = settings.get("support_contact", "dark_princes12")
+    text = f"📞 <b>Support & Help</b>\n\nFor any assistance, please contact:\n👑 <b>Support</b>: @{contact}\n📢 Channel: {FORCE_CHANNEL}\n👥 Group: {FORCE_GROUP}\n\nWe're here to help! 💙"
+    bot.reply_to(m, text, parse_mode="HTML")
 
 # ======================= ADMIN PANEL =======================
 def admin_menu():
@@ -926,8 +958,8 @@ def admin_menu():
         "👑 Add Admin", "🗑 Remove Admin",
         "💸 Referral Control", "⚙ System Settings",
         "💱 Set Deposit Rate", "💱 Set Withdraw Rate",
-        "📞 Set Deposit Numbers", "🔙 User Menu",
-        "🪙 Set Crypto Addresses"
+        "📞 Set Payment Details", "📞 Set Support Contact",
+        "🔙 User Menu"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
     return markup
@@ -1375,20 +1407,20 @@ def set_withdraw_rate(m):
     except:
         bot.reply_to(m, "❌ Invalid rate. Please enter a positive integer.")
 
-@bot.message_handler(func=lambda m: m.text == "📞 Set Deposit Numbers" and is_admin(m.from_user.id))
+@bot.message_handler(func=lambda m: m.text == "📞 Set Payment Details" and is_admin(m.from_user.id))
 def admin_set_deposit_numbers(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
     current = get_settings().get("deposit_numbers", {})
-    text = "📞 <b>Set Deposit Numbers/Addresses</b>\n\n"
-    text += f"Bkash: {current.get('bkash', 'Not set')}\n"
-    text += f"Nagad: {current.get('nagad', 'Not set')}\n"
-    text += f"Rocket: {current.get('rocket', 'Not set')}\n"
-    text += f"TRC20: {current.get('trc20', 'Not set')}\n"
-    text += f"ERC20: {current.get('erc20', 'Not set')}\n"
-    text += f"BEP20: {current.get('bep20', 'Not set')}\n"
-    text += f"BTC: {current.get('btc', 'Not set')}\n\n"
-    text += "Send new address in format:\n<code>method:address</code>\n\nExample: <code>trc20:TXxx...xxx</code>"
+    text = "📞 <b>Set Payment Details</b>\n\n"
+    text += f"💳 Bkash: {current.get('bkash', 'Not set')}\n"
+    text += f"💳 Nagad: {current.get('nagad', 'Not set')}\n"
+    text += f"💳 Rocket: {current.get('rocket', 'Not set')}\n"
+    text += f"🪙 TRC20: {current.get('trc20', 'Not set')}\n"
+    text += f"🪙 ERC20: {current.get('erc20', 'Not set')}\n"
+    text += f"🪙 BEP20: {current.get('bep20', 'Not set')}\n"
+    text += f"🪙 BTC: {current.get('btc', 'Not set')}\n\n"
+    text += "Send new address/number in format:\n<code>method:value</code>\n\nExample: <code>bkash:01309924182</code> or <code>trc20:TXxx...xxx</code>"
     msg = bot.reply_to(m, text, parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_numbers)
 
@@ -1400,23 +1432,36 @@ def process_deposit_numbers(m):
         if len(parts) != 2:
             raise ValueError
         method = parts[0].lower()
-        address = parts[1].strip()
+        value = parts[1].strip()
         allowed_methods = ["bkash", "nagad", "rocket", "trc20", "erc20", "bep20", "btc"]
         if method not in allowed_methods:
             bot.reply_to(m, f"❌ Invalid method. Use: {', '.join(allowed_methods)}")
             return
         settings = get_settings()
         numbers = settings.get("deposit_numbers", {})
-        numbers[method] = address
+        numbers[method] = value
         update_settings({"deposit_numbers": numbers})
-        bot.reply_to(m, f"✅ {method.upper()} address updated to <code>{address}</code>", parse_mode="HTML")
-        logger.info(f"Deposit address for {method} set to {address} by admin {m.from_user.id}")
+        bot.reply_to(m, f"✅ {method.upper()} updated to <code>{value}</code>", parse_mode="HTML")
+        logger.info(f"Deposit {method} updated to {value} by admin {m.from_user.id}")
     except:
-        bot.reply_to(m, "❌ Invalid format. Use: method:address")
+        bot.reply_to(m, "❌ Invalid format. Use: method:value")
 
-@bot.message_handler(func=lambda m: m.text == "🪙 Set Crypto Addresses" and is_admin(m.from_user.id))
-def admin_set_crypto_addresses(m):
-    admin_set_deposit_numbers(m)
+@bot.message_handler(func=lambda m: m.text == "📞 Set Support Contact" and is_admin(m.from_user.id))
+def admin_set_support_contact(m):
+    current = get_settings().get("support_contact", "dark_princes12")
+    msg = bot.reply_to(m, f"📞 <b>Set Support Contact</b>\n\nCurrent support username: @{current}\n\nEnter new username (without @):", parse_mode="HTML")
+    bot.register_next_step_handler(msg, set_support_contact)
+
+def set_support_contact(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
+    new_contact = m.text.strip().replace("@", "")
+    if not new_contact:
+        bot.reply_to(m, "❌ Username cannot be empty.")
+        return
+    update_settings({"support_contact": new_contact})
+    bot.reply_to(m, f"✅ Support contact updated to @{new_contact}.", parse_mode="HTML")
+    logger.info(f"Support contact changed to {new_contact} by admin {m.from_user.id}")
 
 # ------------------- Enhanced Group Messages -------------------
 def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, address=None):
