@@ -72,7 +72,7 @@ if not settings:
         "daily_withdraw_limit": 1000,
         "min_deposit_usd": 5,
         "max_deposit_usd": 5000,
-        "support_contact": "dark_princes12"   # Admin can change this
+        "support_contact": "dark_princes12"
     })
     logger.info("Default settings initialized.")
 
@@ -237,7 +237,6 @@ def mask_string(s, visible=4):
     return "*" * (len(s) - visible) + s[-visible:]
 
 def mask_number(number):
-    """Mask a phone number like 013*****182"""
     if not number or len(number) < 7:
         return "*******"
     return number[:3] + "*****" + number[-3:]
@@ -397,6 +396,7 @@ def main_menu():
         "💳 My Wallet", "💸 Deposit Money",
         "💵 Withdraw Money", "📊 My Investments",
         "🏆 Profit History", "🤝 Referral Program",
+        "📊 My Stats", "🏆 Leaderboard",
         "👤 My Profile", "📞 Support & Help"
     ]
     markup.add(*[KeyboardButton(b) for b in buttons])
@@ -534,7 +534,7 @@ def process_invest_amount(m):
             return
         user = get_user(user_id)
         if user["balance"] < amount:
-            bot.reply_to(m, "❌ Insufficient balance. Your current balance: ${:.2f}".format(user["balance"]))
+            bot.reply_to(m, f"❌ Insufficient balance. Your current balance: ${user['balance']:.2f}.")
             return
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_invest|{plan_id}|{amount}"),
@@ -612,11 +612,10 @@ def deposit_method_cb(call):
     settings = get_settings()
     numbers = settings.get("deposit_numbers", {})
     real_number = numbers.get(method, "Not set")
-    # Mask the number for user display
     if method in ["bkash", "nagad", "rocket"]:
         masked = mask_number(real_number)
     else:
-        masked = mask_string(real_number, 6)  # show last 6 for crypto addresses
+        masked = mask_string(real_number, 6)
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[call.from_user.id] = {"method": method, "real_number": real_number}
@@ -653,7 +652,6 @@ def deposit_method_cb(call):
 def confirm_deposit_details_cb(call):
     if not ensure_joined(call.from_user.id, call.message.chat.id):
         return
-    # Now ask for TXID
     msg = bot.send_message(call.message.chat.id, "🔑 <b>Enter the transaction ID (TXID) of your payment:</b>\n\n<i>Example: 8A1B2C3D4E5F</i>", parse_mode="HTML")
     bot.register_next_step_handler(msg, process_deposit_txid)
     bot.answer_callback_query(call.id)
@@ -906,6 +904,58 @@ def referral_btn(m):
     markup.add(InlineKeyboardButton("📤 Share Link", switch_inline_query=ref_link))
     bot.reply_to(m, text, reply_markup=markup, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_referral")
+
+# ------------------- NEW: My Stats & Leaderboard -------------------
+@bot.message_handler(func=lambda m: m.text == "📊 My Stats")
+def my_stats_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
+    user = get_user(m.from_user.id)
+    if not user:
+        bot.reply_to(m, "❌ User not found. Use /start.")
+        return
+    referrals = user.get("referrals", [])
+    referral_count = len(referrals)
+    bonus = get_settings().get("referral_bonus", 0.01)
+    total_earned = referral_count * bonus
+    text = (
+        f"📊 <b>Your Personal Statistics</b>\n\n"
+        f"👥 <b>Referrals:</b> {referral_count}\n"
+        f"💰 <b>Referral Earnings:</b> ${total_earned:.2f}\n"
+        f"💸 <b>Total Invested:</b> ${user.get('total_invested', 0):.2f}\n"
+        f"🏆 <b>Total Profit:</b> ${user.get('total_profit', 0):.2f}\n"
+        f"📥 <b>Total Deposit:</b> ${user.get('total_deposit', 0):.2f}\n"
+        f"📤 <b>Total Withdraw:</b> ${user.get('total_withdraw', 0):.2f}\n\n"
+        f"💡 <i>Invite more friends to increase your earnings!</i>"
+    )
+    bot.reply_to(m, text, parse_mode="HTML")
+    update_user_activity(m.from_user.id, "view_stats")
+
+@bot.message_handler(func=lambda m: m.text == "🏆 Leaderboard")
+def leaderboard_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
+    # Get all users, sort by number of referrals descending, limit to 10
+    pipeline = [
+        {"$project": {"user_id": 1, "first_name": 1, "username": 1, "referral_count": {"$size": {"$ifNull": ["$referrals", []]}}}},
+        {"$sort": {"referral_count": -1}},
+        {"$limit": 10}
+    ]
+    top_users = list(users_col.aggregate(pipeline))
+    if not top_users:
+        bot.reply_to(m, "🏆 <b>Leaderboard</b>\n\nNo referrals yet. Be the first to invite friends!")
+        return
+    text = "🏆 <b>Top Referrers</b>\n\n"
+    for idx, u in enumerate(top_users, 1):
+        name = u.get("first_name", f"User {u['user_id']}")
+        if u.get("username"):
+            name += f" (@{u['username']})"
+        count = u.get("referral_count", 0)
+        text += f"{idx}. {name} – <b>{count}</b> referrals\n"
+    bot.reply_to(m, text, parse_mode="HTML")
+    update_user_activity(m.from_user.id, "view_leaderboard")
+
+# ------------------- End New -------------------
 
 @bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile_btn(m):
