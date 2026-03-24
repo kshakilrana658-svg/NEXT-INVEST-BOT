@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import time
+import re
 from datetime import datetime, timedelta
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
@@ -238,10 +239,17 @@ def mask_string(s, visible=4):
         return s
     return "*" * (len(s) - visible) + s[-visible:]
 
-def mask_number(number):
-    if not number or len(number) < 7:
-        return "*******"
-    return number[:3] + "*****" + number[-3:]
+def validate_phone_number(number):
+    """Simple Bangladeshi phone number validation (starts with 01, length 11)."""
+    return re.match(r'^01[0-9]{9}$', number) is not None
+
+def validate_crypto_address(address, method):
+    """Basic validation for crypto addresses (length and format)."""
+    if method == "trc20" or method == "erc20" or method == "bep20":
+        return len(address) >= 30 and len(address) <= 45 and address.startswith(('T', '0x'))
+    elif method == "btc":
+        return len(address) >= 25 and len(address) <= 35 and address.startswith(('1', '3', 'bc1'))
+    return True
 
 def check_daily_withdraw_limit(user_id, amount):
     settings = get_settings()
@@ -393,7 +401,7 @@ def ensure_joined(user_id, chat_id):
         return False
     return True
 
-# ======================= MAIN MENU (USER) =======================
+# ======================= MAIN MENU =======================
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
@@ -618,10 +626,7 @@ def deposit_method_cb(call):
     settings = get_settings()
     numbers = settings.get("deposit_numbers", {})
     real_number = numbers.get(method, "Not set")
-    if method in ["bkash", "nagad", "rocket"]:
-        masked = mask_number(real_number)
-    else:
-        masked = mask_string(real_number, 6)
+    # Show full number/address to user
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[call.from_user.id] = {"method": method, "real_number": real_number}
@@ -630,7 +635,7 @@ def deposit_method_cb(call):
         rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
         msg_text = (
             f"📱 <b>{method.capitalize()} Deposit</b>\n\n"
-            f"💸 Send money to this number:\n<code>{masked}</code>\n\n"
+            f"💸 Send money to this number:\n<code>{real_number}</code>\n\n"
             f"💱 <b>Exchange Rate:</b> 1 USD = {rate} BDT\n\n"
             f"📝 <b>Steps:</b>\n"
             f"   1️⃣ Send the exact amount (in BDT) to the number above.\n"
@@ -641,7 +646,7 @@ def deposit_method_cb(call):
     else:
         msg_text = (
             f"🪙 <b>{method.upper()} Deposit</b>\n\n"
-            f"📬 Send funds to this address:\n<code>{masked}</code>\n\n"
+            f"📬 Send funds to this address:\n<code>{real_number}</code>\n\n"
             f"📝 <b>Steps:</b>\n"
             f"   1️⃣ Send the exact amount (in USD equivalent) to the address above.\n"
             f"   2️⃣ After sending, tap <b>✅ Confirm</b>.\n"
@@ -878,9 +883,18 @@ def process_withdraw_account(m):
     if not temp:
         bot.reply_to(m, "❌ Session expired. Please start withdrawal again.")
         return
+    method = temp["method"]
+    # Validate based on method
+    if method in ["bkash", "nagad", "rocket"]:
+        if not validate_phone_number(account):
+            bot.reply_to(m, f"❌ Invalid {method.capitalize()} account number. Please enter a valid 11-digit Bangladeshi number starting with 01.\n\nExample: 01XXXXXXXXX")
+            return
+    else:
+        if not validate_crypto_address(account, method):
+            bot.reply_to(m, f"❌ Invalid {method.upper()} address. Please check and try again.")
+            return
     amount = temp["amount"]
     bdt_to_send = temp["bdt_to_send"]
-    method = temp["method"]
     req_id = create_withdraw_request(user_id, amount, bdt_to_send, method, account)
     bot.reply_to(m, f"✅ <b>Withdrawal request submitted!</b>\n\n💰 Amount: ${amount}\n🆔 Request ID: <code>{req_id}</code>\n\n⏳ <b>Admin will process it.</b>", parse_mode="HTML")
     update_user_activity(user_id, "withdraw_request")
