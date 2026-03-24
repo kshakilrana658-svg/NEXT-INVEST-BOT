@@ -224,6 +224,14 @@ def get_user_name(user_id):
         return f"{name} (@{username})"
     return name
 
+def mask_string(s, visible=4):
+    """Return a masked version of a string showing only last `visible` characters."""
+    if not s:
+        return "****"
+    if len(s) <= visible:
+        return s
+    return "*" * (len(s) - visible) + s[-visible:]
+
 def check_daily_withdraw_limit(user_id, amount):
     settings = get_settings()
     daily_limit = settings.get("daily_withdraw_limit", 1000)
@@ -363,6 +371,17 @@ def is_joined(user_id):
     except:
         return False
 
+def ensure_joined(user_id, chat_id):
+    """Check if user is still joined; if not, send join prompt and return False."""
+    if not is_joined(user_id):
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_CHANNEL[1:]}"))
+        markup.add(InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{FORCE_GROUP[1:]}"))
+        markup.add(InlineKeyboardButton("✅ Verify", callback_data="verify"))
+        bot.send_message(chat_id, "❌ You are not a member of our channel or group. Please join and click Verify to continue:", reply_markup=markup)
+        return False
+    return True
+
 # ======================= MAIN MENU =======================
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -438,9 +457,11 @@ def verify_cb(call):
     else:
         bot.answer_callback_query(call.id, "Still not joined. Please join both.")
 
-# ------------------- MAIN BUTTON HANDLERS -------------------
+# ------------------- MAIN BUTTON HANDLERS (with force join check) -------------------
 @bot.message_handler(func=lambda m: m.text == "📊 Investment Plans")
 def plans_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     plans = get_plans()
     if not plans:
         bot.reply_to(m, "📭 No investment plans available at the moment.")
@@ -456,6 +477,8 @@ def plans_btn(m):
 
 @bot.message_handler(func=lambda m: m.text == "🚀 Invest Now")
 def invest_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     settings = get_settings()
     if not settings.get("deposit_enabled", True):
         bot.reply_to(m, "❌ Investment is currently disabled by admin.")
@@ -464,7 +487,6 @@ def invest_btn(m):
     if not plans:
         bot.reply_to(m, "📭 No investment plans available. Please contact admin.")
         return
-    # Inline keyboard for plan selection
     markup = InlineKeyboardMarkup()
     for pid, p in plans.items():
         markup.add(InlineKeyboardButton(f"{p['name']} (${p['min_amount']} min)", callback_data=f"select_plan|{pid}"))
@@ -472,13 +494,14 @@ def invest_btn(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("select_plan|"))
 def select_plan_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     plan_id = call.data.split("|")[1]
     plans = get_plans()
     plan = plans.get(plan_id)
     if not plan:
         bot.answer_callback_query(call.id, "Plan not found.")
         return
-    # Store selected plan in temp
     if not hasattr(bot, 'temp_invest'):
         bot.temp_invest = {}
     bot.temp_invest[call.from_user.id] = {"plan_id": plan_id, "plan_name": plan["name"], "min_amount": plan["min_amount"]}
@@ -487,6 +510,8 @@ def select_plan_cb(call):
     bot.answer_callback_query(call.id)
 
 def process_invest_amount(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         amount = float(m.text)
         user_id = m.from_user.id
@@ -503,7 +528,6 @@ def process_invest_amount(m):
         if user["balance"] < amount:
             bot.reply_to(m, "❌ Insufficient balance.")
             return
-        # Confirm inline
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_invest|{plan_id}|{amount}"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_invest"))
@@ -513,6 +537,8 @@ def process_invest_amount(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_invest|"))
 def confirm_invest_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     parts = call.data.split("|")
     plan_id = parts[1]
     amount = float(parts[2])
@@ -529,6 +555,8 @@ def confirm_invest_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel_invest")
 def cancel_invest_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     bot.answer_callback_query(call.id, "Cancelled.")
     bot.edit_message_text("❌ Investment cancelled.", call.message.chat.id, call.message.message_id)
     if call.from_user.id in bot.temp_invest:
@@ -536,6 +564,8 @@ def cancel_invest_cb(call):
 
 @bot.message_handler(func=lambda m: m.text == "💰 My Wallet")
 def wallet_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     user = get_user(m.from_user.id)
     if not user:
         bot.reply_to(m, "❌ User not found. Use /start.")
@@ -550,6 +580,8 @@ def wallet_btn(m):
 
 @bot.message_handler(func=lambda m: m.text == "💳 Deposit Money")
 def deposit_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     settings = get_settings()
     if not settings.get("deposit_enabled", True):
         bot.reply_to(m, "❌ Deposit is currently disabled by admin.")
@@ -562,11 +594,12 @@ def deposit_btn(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("deposit_method|"))
 def deposit_method_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     method = call.data.split("|")[1]
     settings = get_settings()
     numbers = settings.get("deposit_numbers", {})
     number = numbers.get(method, "Not set")
-    # Store method in temp
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[call.from_user.id] = {"method": method}
@@ -575,6 +608,8 @@ def deposit_method_cb(call):
     bot.answer_callback_query(call.id)
 
 def process_deposit_txid(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     txid = m.text.strip()
     if not txid:
         bot.reply_to(m, "❌ TXID cannot be empty. Please start deposit again.")
@@ -588,13 +623,14 @@ def process_deposit_txid(m):
     bot.register_next_step_handler(m, process_deposit_amount)
 
 def process_deposit_amount(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         amount_bdt = float(m.text)
         user_id = m.from_user.id
         if user_id not in bot.temp_deposit:
             bot.reply_to(m, "❌ Session expired. Please start deposit again.")
             return
-        # Check limits
         settings = get_settings()
         min_deposit = settings.get("min_deposit_bdt", 100)
         max_deposit = settings.get("max_deposit_bdt", 50000)
@@ -607,7 +643,6 @@ def process_deposit_amount(m):
         rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
         usd_amount = amount_bdt / rate
         bot.temp_deposit[user_id]["amount_bdt"] = amount_bdt
-        # Inline confirm
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data="confirm_deposit"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_deposit"))
@@ -619,6 +654,8 @@ def process_deposit_amount(m):
 
 @bot.callback_query_handler(func=lambda call: call.data == "confirm_deposit")
 def confirm_deposit_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     user_id = call.from_user.id
     data = bot.temp_deposit.get(user_id)
     if not data:
@@ -638,6 +675,8 @@ def confirm_deposit_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel_deposit")
 def cancel_deposit_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     bot.answer_callback_query(call.id, "Cancelled.")
     bot.edit_message_text("❌ Deposit cancelled.", call.message.chat.id, call.message.message_id)
     if call.from_user.id in bot.temp_deposit:
@@ -645,6 +684,8 @@ def cancel_deposit_cb(call):
 
 @bot.message_handler(func=lambda m: m.text == "💵 Withdraw Money")
 def withdraw_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     settings = get_settings()
     if not settings.get("withdraw_enabled", True):
         bot.reply_to(m, "❌ Withdrawal is currently disabled by admin.")
@@ -659,6 +700,8 @@ def withdraw_btn(m):
     bot.register_next_step_handler(msg, process_withdraw_amount)
 
 def process_withdraw_amount(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         amount = float(m.text)
         settings = get_settings()
@@ -674,7 +717,6 @@ def process_withdraw_amount(m):
         if user["balance"] < amount:
             bot.reply_to(m, "❌ Insufficient balance.")
             return
-        # Check daily limit
         within_limit, total_today = check_daily_withdraw_limit(m.from_user.id, amount)
         if not within_limit:
             bot.reply_to(m, f"❌ Daily withdraw limit reached. You have already withdrawn ${total_today:.2f} USD today. Limit is ${settings.get('daily_withdraw_limit', 1000)}.")
@@ -683,7 +725,6 @@ def process_withdraw_amount(m):
         estimated_bdt = amount * rate - SERVICE_CHARGE_BDT
         if estimated_bdt < 0:
             estimated_bdt = 0
-        # Inline confirm
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Proceed", callback_data=f"confirm_withdraw|{amount}"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_withdraw"))
@@ -693,8 +734,9 @@ def process_withdraw_amount(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_withdraw|"))
 def confirm_withdraw_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     amount = float(call.data.split("|")[1])
-    # Store amount in temp
     if not hasattr(bot, 'temp_withdraw'):
         bot.temp_withdraw = {}
     bot.temp_withdraw[call.from_user.id] = {"amount": amount}
@@ -707,6 +749,8 @@ def confirm_withdraw_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("wd_method|"))
 def withdraw_method_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     method = call.data.split("|")[1]
     bot.temp_withdraw[call.from_user.id]["method"] = method
     msg = bot.send_message(call.message.chat.id, f"📞 <b>Enter your {method.capitalize()} account number:</b>", parse_mode="HTML")
@@ -714,6 +758,8 @@ def withdraw_method_cb(call):
     bot.answer_callback_query(call.id)
 
 def process_withdraw_account(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     account = m.text.strip()
     if not account:
         bot.reply_to(m, "❌ Account number cannot be empty.")
@@ -732,6 +778,8 @@ def process_withdraw_account(m):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel_withdraw")
 def cancel_withdraw_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     bot.answer_callback_query(call.id, "Cancelled.")
     bot.edit_message_text("❌ Withdrawal cancelled.", call.message.chat.id, call.message.message_id)
     if call.from_user.id in bot.temp_withdraw:
@@ -739,6 +787,8 @@ def cancel_withdraw_cb(call):
 
 @bot.message_handler(func=lambda m: m.text == "📈 My Investments")
 def my_investments_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     invs = list(investments_col.find({"user_id": m.from_user.id}))
     if not invs:
         bot.reply_to(m, "📭 You have no investments.")
@@ -757,6 +807,8 @@ def my_investments_btn(m):
 
 @bot.message_handler(func=lambda m: m.text == "💸 Profit History")
 def profit_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     user = get_user(m.from_user.id)
     profits = [t for t in user.get("transactions", []) if t["type"] == "profit"]
     if not profits:
@@ -770,6 +822,8 @@ def profit_btn(m):
 
 @bot.message_handler(func=lambda m: m.text == "🤝 Referral Program")
 def referral_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     bot_username = bot.get_me().username
     ref_link = f"https://t.me/{bot_username}?start={m.from_user.id}"
     user = get_user(m.from_user.id)
@@ -784,6 +838,8 @@ def referral_btn(m):
 
 @bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     user = get_user(m.from_user.id)
     if not user:
         bot.reply_to(m, "❌ User not found. Use /start.")
@@ -811,9 +867,11 @@ def profile_btn(m):
 
 @bot.message_handler(func=lambda m: m.text == "📩 Support & Help")
 def support_btn(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     bot.reply_to(m, "📩 <b>Support & Help</b>\n\nFor any assistance, please contact:\n👑 Owner: @dark_princes12\n📢 Channel: " + FORCE_CHANNEL + "\n👥 Group: " + FORCE_GROUP, parse_mode="HTML")
 
-# ======================= ADMIN PANEL =======================
+# ======================= ADMIN PANEL (with force join check for admin) =======================
 def admin_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
@@ -843,9 +901,11 @@ def admin_panel(message):
 def back_to_user_menu(m):
     bot.send_message(m.chat.id, "🔹 <b>Main Menu</b>", reply_markup=main_menu(), parse_mode="HTML")
 
-# ---------- Admin Handlers (with inline confirmations where needed) ----------
+# ---------- Admin Handlers (no force join needed for admins, but we add it anyway) ----------
 @bot.message_handler(func=lambda m: m.text == "👥 Users" and is_admin(m.from_user.id))
 def admin_users(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     users = list(users_col.find().limit(10))
     total = users_col.count_documents({})
     text = f"👥 <b>Total Users:</b> {total}\n\n<b>First 10 Users:</b>\n"
@@ -855,10 +915,14 @@ def admin_users(m):
 
 @bot.message_handler(func=lambda m: m.text == "💰 Balance" and is_admin(m.from_user.id))
 def admin_balance(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     msg = bot.reply_to(m, "💸 <b>Balance Control</b>\n\nSend: <code>user_id amount</code> to add, or <code>user_id -amount</code> to remove.\n\nExample: <code>123456 10</code> or <code>123456 -10</code>", parse_mode="HTML")
     bot.register_next_step_handler(msg, balance_admin)
 
 def balance_admin(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         parts = m.text.split()
         uid = int(parts[0])
@@ -875,6 +939,8 @@ def balance_admin(m):
 
 @bot.message_handler(func=lambda m: m.text == "📥 Deposit" and is_admin(m.from_user.id))
 def admin_deposits(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     pending = get_pending_deposits()
     if not pending:
         bot.reply_to(m, "📭 No pending deposits.")
@@ -890,11 +956,13 @@ def admin_deposits(m):
             markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_dep|{dep['request_id']}"),
                        InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_dep|{dep['request_id']}"))
             bot.send_message(m.chat.id,
-                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>{dep['amount_bdt']} BDT</b>\n🔑 TXID: <code>{dep['txid']}</code>\n💳 Method: {dep.get('method', 'N/A')}",
+                             f"📥 <b>Deposit Request</b>\n👤 User: <code>{dep['user_id']}</code>\n💰 Amount: <b>{dep['amount_bdt']} BDT</b>\n🔑 TXID: <code>{mask_string(dep['txid'])}</code>\n💳 Method: {dep.get('method', 'N/A')}",
                              reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📤 Withdraw" and is_admin(m.from_user.id))
 def admin_withdraws(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     pending = get_pending_withdraws()
     if not pending:
         bot.reply_to(m, "📭 No pending withdrawals.")
@@ -910,11 +978,13 @@ def admin_withdraws(m):
             markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_wd|{wd['request_id']}"),
                        InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_wd|{wd['request_id']}"))
             bot.send_message(m.chat.id,
-                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method']}\n📞 Account: <code>{wd['account']}</code>",
+                             f"📤 <b>Withdraw Request</b>\n👤 User: <code>{wd['user_id']}</code>\n💰 Amount: <b>${wd['amount_usd']}</b>\n💳 Method: {wd['method']}\n📞 Account: <code>{mask_string(wd['account'])}</code>",
                              reply_markup=markup, parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Stats" and is_admin(m.from_user.id))
 def admin_stats(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     total_users = users_col.count_documents({})
     total_balance = sum(u.get("balance", 0) for u in users_col.find())
     total_invested = sum(inv["amount"] for inv in investments_col.find({"status": "active"}))
@@ -923,10 +993,14 @@ def admin_stats(m):
 
 @bot.message_handler(func=lambda m: m.text == "📢 Broadcast" and is_admin(m.from_user.id))
 def admin_broadcast(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     msg = bot.reply_to(m, "📢 <b>Broadcast Message</b>\n\nSend the message you want to broadcast to all users:", parse_mode="HTML")
     bot.register_next_step_handler(msg, broadcast_msg)
 
 def broadcast_msg(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     text = m.text
     count = 0
     for user in users_col.find():
@@ -940,6 +1014,8 @@ def broadcast_msg(m):
 
 @bot.message_handler(func=lambda m: m.text == "📦 Plans" and is_admin(m.from_user.id))
 def admin_plans(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     plans = get_plans()
     text = "📦 <b>Current Investment Plans</b>\n\n"
     for pid, p in plans.items():
@@ -951,13 +1027,16 @@ def admin_plans(m):
 
 @bot.message_handler(func=lambda m: m.text == "🛑 Ban" and is_admin(m.from_user.id))
 def admin_ban(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     msg = bot.reply_to(m, "🚫 <b>Ban User</b>\n\nEnter user ID to ban:", parse_mode="HTML")
     bot.register_next_step_handler(msg, ban_user_cmd)
 
 def ban_user_cmd(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         uid = int(m.text)
-        # Confirm
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Yes, ban", callback_data=f"confirm_ban|{uid}"),
                    InlineKeyboardButton("❌ No", callback_data="cancel_ban"))
@@ -967,6 +1046,8 @@ def ban_user_cmd(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_ban|"))
 def confirm_ban_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     uid = int(call.data.split("|")[1])
     ban_user(uid)
     bot.answer_callback_query(call.id, "✅ User banned.")
@@ -975,15 +1056,21 @@ def confirm_ban_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel_ban")
 def cancel_ban_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     bot.answer_callback_query(call.id, "Cancelled.")
     bot.edit_message_text("❌ Ban cancelled.", call.message.chat.id, call.message.message_id)
 
 @bot.message_handler(func=lambda m: m.text == "🔓 Unban User" and is_admin(m.from_user.id))
 def admin_unban(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     msg = bot.reply_to(m, "🔓 <b>Unban User</b>\n\nEnter user ID to unban:", parse_mode="HTML")
     bot.register_next_step_handler(msg, unban_user_cmd)
 
 def unban_user_cmd(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         uid = int(m.text)
         unban_user(uid)
@@ -993,6 +1080,8 @@ def unban_user_cmd(m):
 
 @bot.message_handler(func=lambda m: m.text == "📝 Update Plans" and is_admin(m.from_user.id))
 def admin_update_plans(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     plans = get_plans()
     text = "📝 <b>Update Investment Plans</b>\n\n"
     for pid, p in plans.items():
@@ -1002,6 +1091,8 @@ def admin_update_plans(m):
     bot.register_next_step_handler(msg, process_plan_update)
 
 def process_plan_update(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         parts = m.text.split()
         if len(parts) != 5:
@@ -1027,6 +1118,8 @@ def process_plan_update(m):
 
 @bot.message_handler(func=lambda m: m.text == "🗑 Remove Plan" and is_admin(m.from_user.id))
 def admin_remove_plan(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     plans = get_plans()
     if not plans:
         bot.reply_to(m, "📭 No plans to remove.")
@@ -1036,6 +1129,8 @@ def admin_remove_plan(m):
     bot.register_next_step_handler(msg, confirm_plan_removal)
 
 def confirm_plan_removal(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     plan_id = m.text.strip().lower()
     plans = get_plans()
     if plan_id not in plans:
@@ -1049,6 +1144,8 @@ def confirm_plan_removal(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_remove_plan|"))
 def confirm_remove_plan_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     plan_id = call.data.split("|")[1]
     if remove_plan(plan_id):
         bot.answer_callback_query(call.id, "✅ Plan removed.")
@@ -1059,11 +1156,15 @@ def confirm_remove_plan_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel_remove_plan")
 def cancel_remove_plan_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     bot.answer_callback_query(call.id, "Removal cancelled.")
     bot.edit_message_text("✅ Removal cancelled.", call.message.chat.id, call.message.message_id)
 
 @bot.message_handler(func=lambda m: m.text == "📊 Analytics" and is_admin(m.from_user.id))
 def admin_analytics(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     total_users = users_col.count_documents({})
     total_deposits = sum(dep["amount_bdt"] for dep in deposits_col.find({"status": "approved"}))
     total_withdraws = sum(wd["amount_usd"] for wd in withdraws_col.find({"status": "approved"}))
@@ -1077,10 +1178,14 @@ def admin_analytics(m):
 
 @bot.message_handler(func=lambda m: m.text == "👑 Add Admin" and m.from_user.id == OWNER_ID)
 def admin_add_admin(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     msg = bot.reply_to(m, "👑 <b>Add Admin</b>\n\nEnter user ID to add as admin:", parse_mode="HTML")
     bot.register_next_step_handler(msg, add_admin)
 
 def add_admin(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         uid = int(m.text)
         if admins_col.find_one({"user_id": uid}):
@@ -1094,10 +1199,14 @@ def add_admin(m):
 
 @bot.message_handler(func=lambda m: m.text == "🗑 Remove Admin" and m.from_user.id == OWNER_ID)
 def admin_remove_admin(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     msg = bot.reply_to(m, "🗑 <b>Remove Admin</b>\n\nEnter user ID to remove from admin:", parse_mode="HTML")
     bot.register_next_step_handler(msg, remove_admin)
 
 def remove_admin(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         uid = int(m.text)
         if uid == OWNER_ID:
@@ -1114,12 +1223,16 @@ def remove_admin(m):
 
 @bot.message_handler(func=lambda m: m.text == "💸 Referral Control" and is_admin(m.from_user.id))
 def admin_referral_control(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     settings = get_settings()
     current = settings.get("referral_bonus", 0.01)
     msg = bot.reply_to(m, f"💸 <b>Referral Bonus Control</b>\n\nCurrent bonus: <b>${current}</b>\n\nSend new bonus amount (e.g., 0.02):", parse_mode="HTML")
     bot.register_next_step_handler(msg, set_referral_bonus)
 
 def set_referral_bonus(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         new_bonus = float(m.text)
         if new_bonus <= 0:
@@ -1132,6 +1245,8 @@ def set_referral_bonus(m):
 
 @bot.message_handler(func=lambda m: m.text == "⚙ System Settings" and is_admin(m.from_user.id))
 def admin_system_settings(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     settings = get_settings()
     text = (
         "⚙ <b>System Settings</b>\n\n"
@@ -1150,6 +1265,8 @@ def admin_system_settings(m):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("sys_toggle_"))
 def sys_toggle_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
@@ -1175,11 +1292,15 @@ def sys_toggle_cb(call):
 
 @bot.message_handler(func=lambda m: m.text == "💱 Set Deposit Rate" and is_admin(m.from_user.id))
 def admin_set_deposit_rate(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     current = get_settings().get("deposit_rate", DEFAULT_DEPOSIT_RATE)
     msg = bot.reply_to(m, f"💱 <b>Set Deposit Rate</b>\n\nCurrent: 1 USD = {current} BDT\n\nEnter new rate (e.g., 130):", parse_mode="HTML")
     bot.register_next_step_handler(msg, set_deposit_rate)
 
 def set_deposit_rate(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         new_rate = int(m.text)
         if new_rate <= 0:
@@ -1192,11 +1313,15 @@ def set_deposit_rate(m):
 
 @bot.message_handler(func=lambda m: m.text == "💱 Set Withdraw Rate" and is_admin(m.from_user.id))
 def admin_set_withdraw_rate(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     current = get_settings().get("withdraw_rate", DEFAULT_WITHDRAW_RATE)
     msg = bot.reply_to(m, f"💱 <b>Set Withdraw Rate</b>\n\nCurrent: 1 USD = {current} BDT\n\nEnter new rate (e.g., 128):", parse_mode="HTML")
     bot.register_next_step_handler(msg, set_withdraw_rate)
 
 def set_withdraw_rate(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         new_rate = int(m.text)
         if new_rate <= 0:
@@ -1209,6 +1334,8 @@ def set_withdraw_rate(m):
 
 @bot.message_handler(func=lambda m: m.text == "📞 Set Deposit Numbers" and is_admin(m.from_user.id))
 def admin_set_deposit_numbers(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     current = get_settings().get("deposit_numbers", {})
     text = "📞 <b>Set Deposit Numbers</b>\n\n"
     text += f"Bkash: {current.get('bkash', 'Not set')}\n"
@@ -1219,6 +1346,8 @@ def admin_set_deposit_numbers(m):
     bot.register_next_step_handler(msg, process_deposit_numbers)
 
 def process_deposit_numbers(m):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     try:
         parts = m.text.split(":")
         if len(parts) != 2:
@@ -1237,29 +1366,30 @@ def process_deposit_numbers(m):
     except:
         bot.reply_to(m, "❌ Invalid format. Use: method:number")
 
-# ------------------- Admin Approval Callbacks -------------------
+# ------------------- Admin Approval Callbacks (with masked data) -------------------
 def format_auto_post(action, type_, user_id, amount, reason=None, txid=None, method=None, account=None):
+    """Format the auto-post message for channel/group with masked sensitive data."""
     user_name = get_user_name(user_id)
     if type_ == "deposit":
         if action == "approve":
             emoji = "✅"
             title = "Deposit Approved"
-            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.capitalize()}"
-        else:
+            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{mask_string(txid)}</code>\n💳 Method: {method.capitalize()}"
+        else:  # reject
             emoji = "❌"
             title = "Deposit Rejected"
-            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{txid}</code>\n💳 Method: {method.capitalize()}"
+            details = f"💵 Amount: <b>{amount} BDT</b>\n🔑 TXID: <code>{mask_string(txid)}</code>\n💳 Method: {method.capitalize()}"
             if reason:
                 details += f"\n💬 <b>Reason:</b> {reason}"
-    else:
+    else:  # withdraw
         if action == "approve":
             emoji = "✅"
             title = "Withdrawal Approved"
-            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.capitalize()}\n📞 Account: <code>{account}</code>"
-        else:
+            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.capitalize()}\n📞 Account: <code>{mask_string(account)}</code>"
+        else:  # reject
             emoji = "❌"
             title = "Withdrawal Rejected"
-            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.capitalize()}\n📞 Account: <code>{account}</code>"
+            details = f"💰 Amount: <b>${amount}</b>\n💳 Method: {method.capitalize()}\n📞 Account: <code>{mask_string(account)}</code>"
             if reason:
                 details += f"\n💬 <b>Reason:</b> {reason}"
     return (
@@ -1285,6 +1415,11 @@ def ask_reason(call, request_id, type_):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reject_reason_"))
 def reject_reason_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Not admin")
+        return
     parts = call.data.split("|")
     type_ = parts[0].split("_")[2]  # deposit or withdraw
     request_id = parts[1]
@@ -1330,6 +1465,8 @@ def process_reject_with_reason(call, request_id, type_, reason):
             bot.answer_callback_query(call.id, "❌ Failed or already processed.")
 
 def process_reject(m, request_id, type_, chat_id, message_id):
+    if not ensure_joined(m.from_user.id, m.chat.id):
+        return
     reason = m.text.strip()
     if not reason:
         reason = "No reason provided"
@@ -1368,6 +1505,8 @@ def process_reject(m, request_id, type_, chat_id, message_id):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_dep|"))
 def approve_dep_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
@@ -1389,6 +1528,8 @@ def approve_dep_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_dep|"))
 def reject_dep_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
@@ -1397,6 +1538,8 @@ def reject_dep_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_wd|"))
 def approve_wd_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
@@ -1418,6 +1561,8 @@ def approve_wd_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_reject_wd|"))
 def reject_wd_cb(call):
+    if not ensure_joined(call.from_user.id, call.message.chat.id):
+        return
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "Not admin")
         return
