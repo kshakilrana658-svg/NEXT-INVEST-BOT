@@ -416,10 +416,11 @@ def welcome_message(first_name):
         f"   1️⃣ Click <b>💸 Deposit Money</b> below\n"
         f"   2️⃣ Choose your preferred payment method\n"
         f"   3️⃣ Send the exact amount to the provided address/number\n"
-        f"   4️⃣ Enter the transaction ID (TXID) and the amount in USD\n"
-        f"   5️⃣ Confirm your deposit\n"
-        f"   6️⃣ Admin will verify and credit your balance\n"
-        f"   7️⃣ Once credited, click <b>💰 Invest Now</b> to start earning\n\n"
+        f"   4️⃣ Enter the transaction ID (TXID)\n"
+        f"   5️⃣ Enter the amount you sent (BDT for fiat, USD for crypto)\n"
+        f"   6️⃣ Confirm your deposit\n"
+        f"   7️⃣ Admin will verify and credit your balance\n"
+        f"   8️⃣ Once credited, click <b>💰 Invest Now</b> to start earning\n\n"
         f"🎁 <b>Welcome Bonus:</b> $0.05 instantly!\n\n"
         f"👇 <b>Use the buttons below to begin</b> 👇"
     )
@@ -629,7 +630,7 @@ def deposit_method_cb(call):
             f"📝 <b>Steps:</b>\n"
             f"   1️⃣ Send the exact amount (in BDT) to the number above.\n"
             f"   2️⃣ After sending, tap <b>✅ Confirm</b>.\n"
-            f"   3️⃣ You will be asked for the <b>TXID</b> and the <b>amount in USD</b>.\n\n"
+            f"   3️⃣ You will be asked for the <b>TXID</b> and then the <b>amount in BDT</b> you sent.\n\n"
             f"🔁 <i>Need to choose another method?</i>"
         )
     else:
@@ -639,7 +640,7 @@ def deposit_method_cb(call):
             f"📝 <b>Steps:</b>\n"
             f"   1️⃣ Send the exact amount (in USD equivalent) to the address above.\n"
             f"   2️⃣ After sending, tap <b>✅ Confirm</b>.\n"
-            f"   3️⃣ You will be asked for the <b>TXID</b> and the <b>amount in USD</b>.\n\n"
+            f"   3️⃣ You will be asked for the <b>TXID</b> and then the <b>amount in USD</b> you sent.\n\n"
             f"🔁 <i>Need to choose another method?</i>"
         )
     markup = InlineKeyboardMarkup()
@@ -683,35 +684,56 @@ def process_deposit_txid(m):
         bot.reply_to(m, "❌ Session expired. Please start deposit again.")
         return
     bot.temp_deposit[user_id]["txid"] = txid
-    bot.reply_to(m, "💸 <b>Enter the amount in USD you sent:</b>\n\n<i>Example: 100</i>\n(You'll receive the same amount in USD balance)", parse_mode="HTML")
+    method = bot.temp_deposit[user_id]["method"]
+    if method in ["bkash", "nagad", "rocket"]:
+        bot.reply_to(m, "💸 <b>Enter the amount in BDT you sent:</b>\n\n<i>Example: 5000</i>\n(You'll receive USD based on current rate)", parse_mode="HTML")
+    else:
+        bot.reply_to(m, "💸 <b>Enter the amount in USD you sent:</b>\n\n<i>Example: 100</i>\n(You'll receive the same amount in USD balance)", parse_mode="HTML")
     bot.register_next_step_handler(m, process_deposit_amount)
 
 def process_deposit_amount(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
     try:
-        amount_usd = float(m.text)
-        if amount_usd <= 0:
+        amount_input = float(m.text)
+        if amount_input <= 0:
             raise ValueError
         user_id = m.from_user.id
         if user_id not in bot.temp_deposit:
             bot.reply_to(m, "❌ Session expired. Please start deposit again.")
             return
-        settings = get_settings()
-        min_deposit = settings.get("min_deposit_usd", 5)
-        max_deposit = settings.get("max_deposit_usd", 5000)
-        if amount_usd < min_deposit:
-            bot.reply_to(m, f"❌ Minimum deposit amount is ${min_deposit}.")
-            return
-        if amount_usd > max_deposit:
-            bot.reply_to(m, f"❌ Maximum deposit amount is ${max_deposit}.")
-            return
-        bot.temp_deposit[user_id]["amount_usd"] = amount_usd
         method = bot.temp_deposit[user_id]["method"]
+        settings = get_settings()
+        if method in ["bkash", "nagad", "rocket"]:
+            # amount_input is in BDT
+            rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
+            usd_amount = amount_input / rate
+            min_deposit_bdt = settings.get("min_deposit_bdt", 100)
+            max_deposit_bdt = settings.get("max_deposit_bdt", 50000)
+            if amount_input < min_deposit_bdt:
+                bot.reply_to(m, f"❌ Minimum deposit amount is {min_deposit_bdt} BDT.")
+                return
+            if amount_input > max_deposit_bdt:
+                bot.reply_to(m, f"❌ Maximum deposit amount is {max_deposit_bdt} BDT.")
+                return
+            confirm_msg = f"✅ You sent <b>{amount_input} BDT</b> → will receive <b>${usd_amount:.2f} USD</b> (1 USD = {rate} BDT).\n\nConfirm?"
+        else:
+            # amount_input is in USD
+            usd_amount = amount_input
+            min_deposit = settings.get("min_deposit_usd", 5)
+            max_deposit = settings.get("max_deposit_usd", 5000)
+            if usd_amount < min_deposit:
+                bot.reply_to(m, f"❌ Minimum deposit amount is ${min_deposit}.")
+                return
+            if usd_amount > max_deposit:
+                bot.reply_to(m, f"❌ Maximum deposit amount is ${max_deposit}.")
+                return
+            confirm_msg = f"✅ You are sending <b>${usd_amount}</b> via {method.upper()}.\n\nConfirm?"
+        bot.temp_deposit[user_id]["amount_usd"] = usd_amount
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ Confirm", callback_data="confirm_deposit"),
                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_deposit"))
-        bot.reply_to(m, f"✅ You are sending <b>${amount_usd}</b> via {method.upper()}.\n\n📝 Please confirm your deposit details:", reply_markup=markup, parse_mode="HTML")
+        bot.reply_to(m, confirm_msg, reply_markup=markup, parse_mode="HTML")
     except:
         bot.reply_to(m, "❌ Invalid amount. Please start deposit again.")
         if user_id in bot.temp_deposit:
@@ -935,7 +957,6 @@ def my_stats_btn(m):
 def leaderboard_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
-    # Get all users, sort by number of referrals descending, limit to 10
     pipeline = [
         {"$project": {"user_id": 1, "first_name": 1, "username": 1, "referral_count": {"$size": {"$ifNull": ["$referrals", []]}}}},
         {"$sort": {"referral_count": -1}},
@@ -1290,16 +1311,31 @@ def cancel_remove_plan_cb(call):
 def admin_analytics(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
         return
-    total_users = users_col.count_documents({})
-    total_deposits = sum(dep["amount_usd"] for dep in deposits_col.find({"status": "approved"}))
-    total_withdraws = sum(wd["amount_usd"] for wd in withdraws_col.find({"status": "approved"}))
-    active_investments = investments_col.count_documents({"status": "active"})
-    text = (f"📊 <b>Analytics</b>\n\n"
-            f"👥 Total Users: {total_users}\n"
-            f"💰 Total Deposits (USD): {total_deposits:.2f}\n"
-            f"💸 Total Withdraws (USD): {total_withdraws:.2f}\n"
-            f"📈 Active Investments: {active_investments}")
-    bot.reply_to(m, text, parse_mode="HTML")
+    try:
+        total_users = users_col.count_documents({})
+
+        deposit_pipeline = [{"$match": {"status": "approved"}}, {"$group": {"_id": None, "total": {"$sum": "$amount_usd"}}}]
+        deposit_result = list(deposits_col.aggregate(deposit_pipeline))
+        total_deposits = deposit_result[0]["total"] if deposit_result else 0.0
+
+        withdraw_pipeline = [{"$match": {"status": "approved"}}, {"$group": {"_id": None, "total": {"$sum": "$amount_usd"}}}]
+        withdraw_result = list(withdraws_col.aggregate(withdraw_pipeline))
+        total_withdraws = withdraw_result[0]["total"] if withdraw_result else 0.0
+
+        active_investments = investments_col.count_documents({"status": "active"})
+
+        text = (
+            "📊 <b>Analytics</b>\n\n"
+            f"👥 Total Users: <b>{total_users}</b>\n"
+            f"💰 Total Deposits (USD): <b>${total_deposits:.2f}</b>\n"
+            f"💸 Total Withdraws (USD): <b>${total_withdraws:.2f}</b>\n"
+            f"📈 Active Investments: <b>{active_investments}</b>"
+        )
+        bot.reply_to(m, text, parse_mode="HTML")
+        logger.info(f"Admin {m.from_user.id} viewed analytics.")
+    except Exception as e:
+        logger.error(f"Analytics error: {e}")
+        bot.reply_to(m, "❌ An error occurred while fetching analytics. Please check the logs.")
 
 @bot.message_handler(func=lambda m: m.text == "👑 Add Admin" and m.from_user.id == OWNER_ID)
 def admin_add_admin(m):
