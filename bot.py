@@ -1774,9 +1774,9 @@ def set_trade_multiplier(m):
     except:
         bot.reply_to(m, "❌ Invalid multiplier. Must be > 1.")
 
-# ======================= FLASK API (CORS enabled) =======================
+# ======================= FLASK API =======================
 flask_app = Flask(__name__)
-CORS(flask_app)  # Allow all origins
+CORS(flask_app)  # Allow all origins for the frontend
 
 @flask_app.route('/')
 @flask_app.route('/health')
