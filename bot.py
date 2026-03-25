@@ -386,7 +386,6 @@ threading.Thread(target=process_auto_profit, daemon=True).start()
 
 # ---------- Trading ----------
 def get_current_price(symbol):
-    """Fetch current price from Binance API."""
     try:
         resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
         data = resp.json()
@@ -396,28 +395,24 @@ def get_current_price(symbol):
         return None
 
 def settle_expired_trades():
-    """Background thread to check all users' open trades and settle them."""
     while True:
-        time.sleep(1)  # Check every second
-        now = datetime.utcnow().timestamp() * 1000  # milliseconds
+        time.sleep(1)
+        now = datetime.utcnow().timestamp() * 1000
         # Find all users with open trades
         users = users_col.find({"trading.open_trades": {"$exists": True, "$ne": []}})
         for user in users:
             open_trades = user.get("trading", {}).get("open_trades", [])
             if not open_trades:
                 continue
-            settled = []
+            changed = False
             for trade in open_trades:
                 if trade["expiry_timestamp"] <= now:
-                    # Trade expired
                     symbol = trade["symbol"]
                     entry_price = trade["entry_price"]
                     direction = trade["direction"]
                     amount = trade["amount"]
-                    # Get current price
                     current_price = get_current_price(symbol)
                     if current_price is None:
-                        # If price fetch fails, skip for now
                         continue
                     win = False
                     if direction == "up" and current_price > entry_price:
@@ -429,13 +424,10 @@ def settle_expired_trades():
                     multiplier = settings.get("trade_payout_multiplier", 1.5)
                     if win:
                         payout = amount * multiplier
-                        # Add profit to balance
                         users_col.update_one({"user_id": user["user_id"]}, {"$inc": {"balance": payout - amount}})
                         add_transaction(user["user_id"], "trade_win", payout - amount, "completed", f"Won trade on {symbol}")
                     else:
-                        # Already deducted amount when trade placed, so no further deduction
                         add_transaction(user["user_id"], "trade_loss", amount, "completed", f"Lost trade on {symbol}")
-                    # Record history
                     history_entry = {
                         "id": trade["id"],
                         "symbol": symbol,
@@ -458,6 +450,10 @@ def settle_expired_trades():
                         {"$pop": {"trading.history": -1}} if len(user.get("trading", {}).get("history", [])) >= 50 else {}
                     )
                     logger.info(f"Settled trade {trade['id']} for user {user['user_id']}: {'win' if win else 'loss'}")
+                    changed = True
+            if changed:
+                # Update the user object for next loop
+                pass
 
 threading.Thread(target=settle_expired_trades, daemon=True).start()
 
@@ -681,6 +677,7 @@ def wallet_btn(m):
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_wallet")
 
+# ------------------- DEPOSIT (FIXED: show full number/address) -------------------
 @bot.message_handler(func=lambda m: m.text == "💸 Deposit Money")
 def deposit_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
@@ -707,10 +704,7 @@ def deposit_method_cb(call):
     settings = get_settings()
     numbers = settings.get("deposit_numbers", {})
     real_number = numbers.get(method, "Not set")
-    if method in ["bkash", "nagad", "rocket"]:
-        masked = mask_number(real_number)
-    else:
-        masked = mask_string(real_number, 6)
+    # SHOW FULL NUMBER/ADDRESS (no masking)
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[call.from_user.id] = {"method": method, "real_number": real_number}
@@ -719,7 +713,7 @@ def deposit_method_cb(call):
         rate = settings.get("deposit_rate", DEFAULT_DEPOSIT_RATE)
         msg_text = (
             f"📱 <b>{method.capitalize()} Deposit</b>\n\n"
-            f"💸 Send money to this number:\n<code>{masked}</code>\n\n"
+            f"💸 Send money to this number:\n<code>{real_number}</code>\n\n"
             f"💱 <b>Exchange Rate:</b> 1 USD = {rate} BDT\n\n"
             f"📝 <b>Steps:</b>\n"
             f"   1️⃣ Send the exact amount (in BDT) to the number above.\n"
@@ -730,7 +724,7 @@ def deposit_method_cb(call):
     else:
         msg_text = (
             f"🪙 <b>{method.upper()} Deposit</b>\n\n"
-            f"📬 Send funds to this address:\n<code>{masked}</code>\n\n"
+            f"📬 Send funds to this address:\n<code>{real_number}</code>\n\n"
             f"📝 <b>Steps:</b>\n"
             f"   1️⃣ Send the exact amount (in USD equivalent) to the address above.\n"
             f"   2️⃣ After sending, tap <b>✅ Confirm</b>.\n"
@@ -871,6 +865,7 @@ def cancel_deposit_cb(call):
     if call.from_user.id in bot.temp_deposit:
         del bot.temp_deposit[call.from_user.id]
 
+# ------------------- WITHDRAW -------------------
 @bot.message_handler(func=lambda m: m.text == "💵 Withdraw Money")
 def withdraw_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
@@ -1086,7 +1081,7 @@ def leaderboard_btn(m):
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_leaderboard")
 
-# ------------------- TRADE NOW BUTTON -------------------
+# ------------------- TRADE NOW -------------------
 @bot.message_handler(func=lambda m: m.text == "📊 Trade Now")
 def trade_now_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
@@ -1095,7 +1090,6 @@ def trade_now_btn(m):
     if not settings.get("trading_enabled", True):
         bot.reply_to(m, "❌ Trading is currently disabled by admin.")
         return
-    # Create a web app button with the trading page URL
     base_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}"
     web_app_url = f"{base_url}/trading?user_id={m.from_user.id}"
     markup = InlineKeyboardMarkup()
@@ -2060,6 +2054,7 @@ TRADING_HTML = '''
         .coin-list-dropdown.show { display: block; }
         .coin-search-item:hover { background: #2B3139; cursor: pointer; }
         .timeframe-btn.active { background: #F0B90B; color: #000; }
+        .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1E2329; border-radius: 8px; padding: 8px 16px; z-index: 100; }
     </style>
 </head>
 <body class="p-3 md:p-4 bg-[#0B0E11]">
@@ -2145,7 +2140,7 @@ TRADING_HTML = '''
                             <i class="fas fa-arrow-down"></i> DOWN
                         </button>
                     </div>
-                    <div class="text-xs text-center text-gray-400">Payout: 50% profit (Win: 1.5x stake)</div>
+                    <div class="text-xs text-center text-gray-400" id="payoutInfo">Payout: 50% profit (Win: 1.5x stake)</div>
                 </div>
                 <div class="bg-black/30 rounded-xl p-2">
                     <div class="text-sm font-semibold mb-2">⏳ Open Trades</div>
@@ -2164,6 +2159,8 @@ TRADING_HTML = '''
             </div>
         </div>
     </div>
+
+    <div id="toast" class="toast hidden"></div>
 
     <script>
         // Extract user_id from URL
@@ -2226,8 +2223,16 @@ TRADING_HTML = '''
         const timeframeBtns = document.querySelectorAll('.timeframe-btn');
         const candleBtn = document.getElementById('candleBtn');
         const lineBtn = document.getElementById('lineBtn');
+        const payoutInfoSpan = document.getElementById('payoutInfo');
 
-        // Helper functions
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.innerText = message;
+            toast.classList.remove('hidden', 'bg-green-600', 'bg-red-600');
+            toast.classList.add(isError ? 'bg-red-600' : 'bg-green-600');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        }
+
         function formatBDTime() {
             const now = new Date();
             const bdTime = new Date(now.getTime() + (6 * 60 * 60 * 1000));
@@ -2250,7 +2255,8 @@ TRADING_HTML = '''
                 const res = await fetch(`${API_BASE}/trading/api/settings`);
                 const data = await res.json();
                 payoutMultiplier = data.payout_multiplier;
-                // Update UI for min/max if needed
+                const profitPercent = (payoutMultiplier - 1) * 100;
+                payoutInfoSpan.innerText = `Payout: ${profitPercent}% profit (Win: ${payoutMultiplier}x stake)`;
                 document.getElementById('tradeAmount').min = data.min_trade;
                 document.getElementById('tradeAmount').max = data.max_trade;
             } catch (err) {
@@ -2314,11 +2320,11 @@ TRADING_HTML = '''
 
         async function placeTrade(direction) {
             let amount = parseFloat(tradeAmountInput.value);
-            if (isNaN(amount) || amount <= 0) { alert("Enter valid amount"); return; }
-            if (amount > balances.USDT) { alert("Insufficient balance!"); return; }
+            if (isNaN(amount) || amount <= 0) { showToast("Enter valid amount", true); return; }
+            if (amount > balances.USDT) { showToast("Insufficient balance!", true); return; }
             const expirySec = parseInt(tradeTimeSelect.value);
             const entryPrice = currentPrice;
-            if (!entryPrice) { alert("Price not loaded yet"); return; }
+            if (!entryPrice) { showToast("Price not loaded yet", true); return; }
 
             try {
                 const res = await fetch(`${API_BASE}/trading/api/place_trade`, {
@@ -2337,15 +2343,15 @@ TRADING_HTML = '''
                 if (data.success) {
                     balances.USDT = data.new_balance;
                     balanceDisplay.innerText = balances.USDT.toFixed(2);
-                    // Refresh open trades and history
                     fetchOpenTrades();
                     fetchHistory();
+                    showToast(`Trade placed: ${direction.toUpperCase()} $${amount}`);
                 } else {
-                    alert(data.error || "Trade failed");
+                    showToast(data.error || "Trade failed", true);
                 }
             } catch (err) {
                 console.error("Trade error", err);
-                alert("Failed to place trade");
+                showToast("Failed to place trade", true);
             }
         }
 
@@ -2690,7 +2696,6 @@ def trading_page():
     user_id = request.args.get('user_id')
     if not user_id:
         return "Missing user_id", 400
-    # Ensure user exists
     if not get_user(int(user_id)):
         return "User not found", 404
     return TRADING_HTML
@@ -2723,9 +2728,9 @@ def api_open_trades():
     if not user:
         return jsonify({"error": "User not found"}), 404
     open_trades = user.get("trading", {}).get("open_trades", [])
-    # Convert datetime fields to strings if needed
+    # Ensure all fields are JSON serializable
     for trade in open_trades:
-        # Ensure all fields are JSON serializable
+        # Already fine
         pass
     return jsonify(open_trades)
 
@@ -2737,8 +2742,7 @@ def api_history():
     user = get_user(int(user_id))
     if not user:
         return jsonify({"error": "User not found"}), 404
-    history = user.get("trading", {}).get("history", [])[-50:]  # last 50
-    # Format for display
+    history = user.get("trading", {}).get("history", [])[-50:]
     formatted = []
     for h in history:
         formatted.append({
@@ -2767,7 +2771,6 @@ def api_place_trade():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    # Check trading enabled
     settings = get_settings()
     if not settings.get("trading_enabled", True):
         return jsonify({"error": "Trading is disabled by admin"}), 403
@@ -2780,11 +2783,9 @@ def api_place_trade():
     if user["balance"] < amount:
         return jsonify({"error": "Insufficient balance"}), 400
 
-    # Deduct amount from balance
     new_balance = user["balance"] - amount
     users_col.update_one({"user_id": user["user_id"]}, {"$set": {"balance": new_balance}})
 
-    # Create trade object
     trade_id = int(time.time() * 1000)
     trade = {
         "id": trade_id,
@@ -2796,7 +2797,6 @@ def api_place_trade():
         "created_at": datetime.utcnow()
     }
 
-    # Add to user's open trades
     users_col.update_one(
         {"user_id": user["user_id"]},
         {"$push": {"trading.open_trades": trade}}
