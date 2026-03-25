@@ -387,9 +387,16 @@ threading.Thread(target=process_auto_profit, daemon=True).start()
 # ---------- Trading ----------
 def get_current_price(symbol):
     try:
-        resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
+        resp = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}", timeout=5)
+        if resp.status_code != 200:
+            logger.warning(f"Binance price API returned {resp.status_code} for {symbol}")
+            return None
         data = resp.json()
-        return float(data["price"])
+        if isinstance(data, dict) and 'price' in data:
+            return float(data['price'])
+        else:
+            logger.warning(f"Unexpected response from Binance for {symbol}: {data}")
+            return None
     except Exception as e:
         logger.error(f"Failed to get price for {symbol}: {e}")
         return None
@@ -398,7 +405,6 @@ def settle_expired_trades():
     while True:
         time.sleep(1)
         now = datetime.utcnow().timestamp() * 1000
-        # Find all users with open trades
         users = users_col.find({"trading.open_trades": {"$exists": True, "$ne": []}})
         for user in users:
             open_trades = user.get("trading", {}).get("open_trades", [])
@@ -413,6 +419,7 @@ def settle_expired_trades():
                     amount = trade["amount"]
                     current_price = get_current_price(symbol)
                     if current_price is None:
+                        # If price fetch fails, skip for now (will retry next second)
                         continue
                     win = False
                     if direction == "up" and current_price > entry_price:
@@ -677,7 +684,7 @@ def wallet_btn(m):
     bot.reply_to(m, text, parse_mode="HTML")
     update_user_activity(m.from_user.id, "view_wallet")
 
-# ------------------- DEPOSIT (FIXED: show full number/address) -------------------
+# ------------------- DEPOSIT -------------------
 @bot.message_handler(func=lambda m: m.text == "💸 Deposit Money")
 def deposit_btn(m):
     if not ensure_joined(m.from_user.id, m.chat.id):
@@ -704,7 +711,6 @@ def deposit_method_cb(call):
     settings = get_settings()
     numbers = settings.get("deposit_numbers", {})
     real_number = numbers.get(method, "Not set")
-    # SHOW FULL NUMBER/ADDRESS (no masking)
     if not hasattr(bot, 'temp_deposit'):
         bot.temp_deposit = {}
     bot.temp_deposit[call.from_user.id] = {"method": method, "real_number": real_number}
@@ -2728,10 +2734,6 @@ def api_open_trades():
     if not user:
         return jsonify({"error": "User not found"}), 404
     open_trades = user.get("trading", {}).get("open_trades", [])
-    # Ensure all fields are JSON serializable
-    for trade in open_trades:
-        # Already fine
-        pass
     return jsonify(open_trades)
 
 @flask_app.route('/trading/api/history')
@@ -2818,4 +2820,6 @@ threading.Thread(target=run_flask, daemon=True).start()
 # ======================= START BOT =======================
 if __name__ == "__main__":
     logger.info("Bot started...")
+    # Allow previous instance to shut down
+    time.sleep(5)
     bot.infinity_polling()
