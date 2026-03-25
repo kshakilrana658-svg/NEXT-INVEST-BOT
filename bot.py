@@ -7,7 +7,7 @@ import requests
 from datetime import datetime, timedelta
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
@@ -410,7 +410,6 @@ def settle_expired_trades():
             open_trades = user.get("trading", {}).get("open_trades", [])
             if not open_trades:
                 continue
-            changed = False
             for trade in open_trades:
                 if trade["expiry_timestamp"] <= now:
                     symbol = trade["symbol"]
@@ -419,6 +418,7 @@ def settle_expired_trades():
                     amount = trade["amount"]
                     current_price = get_current_price(symbol)
                     if current_price is None:
+                        # If price fetch fails, try again next second
                         continue
                     win = False
                     if direction == "up" and current_price > entry_price:
@@ -443,6 +443,7 @@ def settle_expired_trades():
                         "payout": payout if win else 0,
                         "timestamp": datetime.utcnow()
                     }
+                    # Remove from open_trades and add to history
                     users_col.update_one(
                         {"user_id": user["user_id"]},
                         {
@@ -450,18 +451,12 @@ def settle_expired_trades():
                             "$push": {"trading.history": history_entry}
                         }
                     )
-                    # Limit history to 50
-                    history = user.get("trading", {}).get("history", [])
-                    if len(history) >= 50:
-                        users_col.update_one(
-                            {"user_id": user["user_id"]},
-                            {"$pop": {"trading.history": -1}}
-                        )
+                    # Keep history size manageable
+                    users_col.update_one(
+                        {"user_id": user["user_id"]},
+                        {"$pop": {"trading.history": -1}} if len(user.get("trading", {}).get("history", [])) >= 50 else {}
+                    )
                     logger.info(f"Settled trade {trade['id']} for user {user['user_id']}: {'win' if win else 'loss'}")
-                    changed = True
-            if changed:
-                # Update the user object for next loop
-                pass
 
 threading.Thread(target=settle_expired_trades, daemon=True).start()
 
@@ -488,7 +483,7 @@ def ensure_joined(user_id, chat_id):
 def main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
-        "📊 Trade Now",  # Top button
+        "📊 Trade Now",
         "📈 Investment Plans", "💰 Invest Now",
         "💳 My Wallet", "💸 Deposit Money",
         "💵 Withdraw Money", "📊 My Investments",
@@ -2018,7 +2013,7 @@ def reject_wd_cb(call):
     req_id = call.data.split("|")[1]
     ask_reason(call, req_id, "withdraw")
 
-# ======================= TRADING WEB APP (FULLY FIXED) =======================
+# ======================= TRADING WEB APP =======================
 TRADING_HTML = '''
 <!DOCTYPE html>
 <html lang="en">
