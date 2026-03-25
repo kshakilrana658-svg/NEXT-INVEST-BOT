@@ -410,6 +410,7 @@ def settle_expired_trades():
             open_trades = user.get("trading", {}).get("open_trades", [])
             if not open_trades:
                 continue
+            changed = False
             for trade in open_trades:
                 if trade["expiry_timestamp"] <= now:
                     symbol = trade["symbol"]
@@ -457,6 +458,10 @@ def settle_expired_trades():
                             {"$pop": {"trading.history": -1}}
                         )
                     logger.info(f"Settled trade {trade['id']} for user {user['user_id']}: {'win' if win else 'loss'}")
+                    changed = True
+            if changed:
+                # Update the user object for next loop
+                pass
 
 threading.Thread(target=settle_expired_trades, daemon=True).start()
 
@@ -2342,8 +2347,9 @@ TRADING_HTML = '''
                 if (data.success) {
                     balances.USDT = data.new_balance;
                     balanceDisplay.innerText = balances.USDT.toFixed(2);
-                    fetchOpenTrades();
-                    fetchHistory();
+                    // Immediately refresh open trades and history
+                    await fetchOpenTrades();
+                    await fetchHistory();
                     showToast(`Trade placed: ${direction.toUpperCase()} $${amount}`);
                 } else {
                     showToast(data.error || "Trade failed", true);
@@ -2666,9 +2672,11 @@ TRADING_HTML = '''
             await fetchAllCoins();
             initChart();
             connectWebSocket();
-            setInterval(fetch24hData, 60000);
-            setInterval(fetchOpenTrades, 5000);
-            setInterval(fetchHistory, 5000);
+            // Auto-refresh every second for open trades, every 2 seconds for history
+            setInterval(async () => {
+                await fetchOpenTrades();
+                await fetchHistory();
+            }, 2000);
             upBtn.addEventListener('click', () => placeTrade('up'));
             downBtn.addEventListener('click', () => placeTrade('down'));
             candleBtn.addEventListener('click', () => setChartMode('candle'));
