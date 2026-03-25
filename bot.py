@@ -418,7 +418,6 @@ def settle_expired_trades():
                     amount = trade["amount"]
                     current_price = get_current_price(symbol)
                     if current_price is None:
-                        # If price fetch fails, try again next second
                         continue
                     win = False
                     if direction == "up" and current_price > entry_price:
@@ -443,18 +442,13 @@ def settle_expired_trades():
                         "payout": payout if win else 0,
                         "timestamp": datetime.utcnow()
                     }
-                    # Remove from open_trades and add to history
+                    # Remove from open_trades and add to history (no limit)
                     users_col.update_one(
                         {"user_id": user["user_id"]},
                         {
                             "$pull": {"trading.open_trades": {"id": trade["id"]}},
                             "$push": {"trading.history": history_entry}
                         }
-                    )
-                    # Keep history size manageable
-                    users_col.update_one(
-                        {"user_id": user["user_id"]},
-                        {"$pop": {"trading.history": -1}} if len(user.get("trading", {}).get("history", [])) >= 50 else {}
                     )
                     logger.info(f"Settled trade {trade['id']} for user {user['user_id']}: {'win' if win else 'loss'}")
 
@@ -2740,7 +2734,8 @@ def api_history():
     user = get_user(int(user_id))
     if not user:
         return jsonify({"error": "User not found"}), 404
-    history = user.get("trading", {}).get("history", [])[-50:]
+    history = user.get("trading", {}).get("history", [])
+    # Return all history, no limit
     formatted = []
     for h in history:
         formatted.append({
@@ -2748,7 +2743,7 @@ def api_history():
             "direction": h["direction"],
             "amount": h["amount"],
             "result": h["result"],
-            "time": h["timestamp"].strftime("%H:%M:%S") if isinstance(h["timestamp"], datetime) else h["timestamp"]
+            "time": h["timestamp"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(h["timestamp"], datetime) else h["timestamp"]
         })
     return jsonify(formatted)
 
